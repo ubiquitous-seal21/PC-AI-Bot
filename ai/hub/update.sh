@@ -7,6 +7,14 @@ BACKUP=$(mktemp -d)
 
 git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
 
+# The helper container runs as root. Reapply the repository host owner's
+# UID/GID so Git remains writable after the helper has fetched or stashed files.
+if [ "$(id -u)" -eq 0 ] && [ -d "$REPO" ]; then
+  REPO_UID=$(stat -c '%u' "$REPO")
+  REPO_GID=$(stat -c '%g' "$REPO")
+  chown -R "$REPO_UID:$REPO_GID" "$REPO" 2>/dev/null || true
+fi
+
 if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   if ! docker info >/dev/null 2>&1; then
     printf 'Update failed: Docker daemon is unavailable from the Hub container\n' > "$STATUS"
