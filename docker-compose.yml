@@ -1,6 +1,6 @@
 services:
   ai-hub:
-    build: ./hub
+    build: ./ai/hub
     container_name: ai-hub
     restart: unless-stopped
     network_mode: host      # lets the container send Wake-on-LAN broadcasts

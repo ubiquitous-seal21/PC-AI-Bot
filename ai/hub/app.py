@@ -19,7 +19,8 @@ app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("HUB_COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
+app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(hours=12)
 app.secret_key = hashlib.sha256(("hub-session|" + PASSWORD).encode()).digest()
 
 _fails = {}
@@ -32,6 +33,11 @@ def ok(**kw):
 
 def err(msg, code=400):
     return jsonify({"ok": False, "error": msg}), code
+
+
+@app.errorhandler(413)
+def upload_too_large(_):
+    return err(f"Upload exceeds the {MAX_UPLOAD_MB} MB limit.", 413)
 
 
 @app.before_request
@@ -195,6 +201,24 @@ def pc_wake():
 def pc_off():
     E.power_off_pc()
     return ok()
+
+
+@app.put("/api/pc/pause")
+def pc_pause():
+    raw = request.get_json(silent=True) or {}
+    if "paused" not in raw:
+        return err("Missing paused value.")
+    return ok(paused=E.set_paused(raw["paused"]))
+
+
+@app.post("/api/chat")
+def chat():
+    raw = request.get_json(silent=True) or {}
+    try:
+        rid = E.enqueue_chat(raw.get("message", ""))
+        return ok(id=rid)
+    except (RuntimeError, ValueError) as e:
+        return err(str(e), 409 if isinstance(e, RuntimeError) else 400)
 
 
 def main():

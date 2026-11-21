@@ -11,6 +11,7 @@ import glob
 import hashlib
 import html
 import io
+import ipaddress
 import json
 import os
 import queue
@@ -24,6 +25,7 @@ import threading
 import time
 import uuid
 from email.message import EmailMessage
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -323,7 +325,8 @@ def run(cmd, timeout):
 
 
 # ---------- PC power ----------
-state = {"last": time.time(), "busy": 0, "we_woke": False}
+state = {"last": time.time(), "busy": 0, "worker_busy": False,
+         "paused": False, "we_woke": False}
 jobs = queue.Queue()
 
 
@@ -388,7 +391,7 @@ def pc_job(prog=None):
 
 def power_off_pc():
     if not PC_USER:
-        return
+        return False
     cmd = ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
            "-o", "StrictHostKeyChecking=accept-new",
            "-o", f"UserKnownHostsFile={DATA}/known_hosts",
@@ -396,8 +399,39 @@ def power_off_pc():
     try:
         p = run(cmd, 30)
         log("power-off sent, exit code", p.returncode, p.stderr.strip()[:200])
+        if p.returncode != 0:
+            return False
+        return True
     except Exception as e:
         log("power-off failed:", e)
+        return False
+
+
+def pc_has_active_sessions():
+    """Fail closed: if session state cannot be verified, do not auto-power-off."""
+    if not PC_USER:
+        return True
+    cmd = ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+           "-o", "StrictHostKeyChecking=accept-new",
+           "-o", f"UserKnownHostsFile={DATA}/known_hosts",
+           f"{PC_USER}@{PC_IP}",
+           "session_output=$(loginctl list-sessions --no-legend 2>/dev/null); "
+           "if [ -z \"$session_output\" ]; then exit 0; fi; "
+           "printf '%s\\n' \"$session_output\" | awk '{print $1}' | "
+           "while read -r sid; do loginctl show-session \"$sid\" "
+           "--no-pager -p State -p Active -p IdleHint -p Remote 2>/dev/null; done"]
+    try:
+        p = run(cmd, 30)
+        if p.returncode != 0:
+            log("active-session check failed:", p.stderr.strip()[:200])
+            return True
+        for line in p.stdout.splitlines():
+            if line.strip() in ("Active=yes", "State=active", "IdleHint=no"):
+                return True
+        return False
+    except Exception as e:
+        log("active-session check failed:", repr(e))
+        return True
 
 
 def idle_loop():
@@ -406,12 +440,13 @@ def idle_loop():
         if IDLE_OFF_MIN <= 0:
             continue
         with _lock:
-            idle = state["busy"] == 0 and time.time() - state["last"] > IDLE_OFF_MIN * 60
+            idle = (state["busy"] == 0 and not state["worker_busy"]
+                    and time.time() - state["last"] > IDLE_OFF_MIN * 60)
             woke = state["we_woke"]
-        if idle and woke:  # only power off a PC this program woke, never one you are using
-            power_off_pc()
-            with _lock:
-                state["we_woke"] = False
+        if idle and woke and not pc_has_active_sessions():
+            if power_off_pc():
+                with _lock:
+                    state["we_woke"] = False
 
 
 # ---------- Ollama ----------
@@ -435,7 +470,48 @@ def chat(prompt, model, images=None, schema=None, num_ctx=8192):
 URL_RE = re.compile(r"https?://[^\s<>\"')]+")
 
 
+def validate_public_url(url):
+    """Require HTTP(S) and reject DNS names that resolve into private networks."""
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise RuntimeError("Only public HTTP and HTTPS links are allowed.")
+    if parsed.username or parsed.password:
+        raise RuntimeError("Links containing credentials are not allowed.")
+    hostname = parsed.hostname.lower().rstrip(".")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise RuntimeError("Local and loopback links are not allowed.")
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+                                                            type=socket.SOCK_STREAM)}
+    except socket.gaierror as e:
+        raise RuntimeError(f"Could not resolve link host: {hostname}") from e
+    if not addresses:
+        raise RuntimeError("Could not resolve link host.")
+    for address in addresses:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+        if not ip.is_global:
+            raise RuntimeError("Links to private, loopback, link-local, or reserved networks are not allowed.")
+    return str(parsed.geturl())
+
+
+def public_http_get(url, timeout=30):
+    current = validate_public_url(url)
+    for _ in range(5):
+        r = requests.get(current, timeout=timeout, allow_redirects=False,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code in (301, 302, 303, 307, 308):
+            location = r.headers.get("Location")
+            if not location:
+                r.raise_for_status()
+            current = validate_public_url(urljoin(current, location))
+            continue
+        r.raise_for_status()
+        return r
+    raise RuntimeError("The link redirected too many times.")
+
+
 def video_info(url):
+    url = validate_public_url(url)
     try:
         p = run(["yt-dlp", "--skip-download", "--no-playlist", "--dump-single-json", url], 90)
     except Exception:
@@ -449,6 +525,7 @@ def video_info(url):
 
 
 def get_captions(url, d):
+    url = validate_public_url(url)
     run(["yt-dlp", "--skip-download", "--no-playlist", "--write-subs", "--write-auto-subs",
          "--sub-langs", f"{SUB_LANG}.*,{SUB_LANG}", "--convert-subs", "srt",
          "-o", f"{d}/sub", url], 180)
@@ -461,6 +538,7 @@ _whisper = None
 
 def transcribe(url, d):
     global _whisper
+    url = validate_public_url(url)
     run(["yt-dlp", "--no-playlist", "-f", "ba/b", "-x", "--audio-format", "mp3",
          "-o", f"{d}/audio.%(ext)s", url], 900)
     audio = glob.glob(f"{d}/audio.*")
@@ -475,6 +553,7 @@ def transcribe(url, d):
 
 
 def get_frames(url, d, duration):
+    url = validate_public_url(url)
     run(["yt-dlp", "--no-playlist", "-f", "wv*[height>=360]/wv*/w", "-o", f"{d}/video.%(ext)s", url], 900)
     vids = [f for f in glob.glob(f"{d}/video.*") if not f.endswith(".part")]
     if not vids:
@@ -519,8 +598,7 @@ def source_from_video(url, info, prog):
 
 def source_from_article(url):
     import trafilatura
-    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
+    r = public_http_get(url, timeout=30)
     text = trafilatura.extract(r.text, include_comments=False) or strip_html(r.text)
     if len(text) < 200:
         raise RuntimeError(f"I couldn't read any text from {url}")
@@ -528,6 +606,7 @@ def source_from_article(url):
 
 
 def source_from_url(url, prog):
+    url = validate_public_url(url)
     info = video_info(url)
     return source_from_video(url, info, prog) if info else source_from_article(url)
 
@@ -596,18 +675,18 @@ def run_task(rid, preset, note, urls, files, email):
         update_run(rid, status="running", detail=t)
 
     try:
-        prog("Collecting sources")
-        all_urls = list(dict.fromkeys([u.strip() for u in urls if u.strip()] + URL_RE.findall(note)))[:5]
-        sources = []
-        for u in all_urls:
-            prog(f"Reading {u[:70]}")
-            sources.append(source_from_url(u, prog))
-        for name, data in files:
-            sources.append(source_from_file(name, data))
-        images = [im for s in sources for im in s["images"]][:12]
-        prompt = build_prompt(preset, note, sources)
-        model = VISION_MODEL if images or preset.get("vision") else TEXT_MODEL
         with pc_job(prog):
+            prog("Collecting sources")
+            all_urls = list(dict.fromkeys([u.strip() for u in urls if u.strip()] + URL_RE.findall(note)))[:5]
+            sources = []
+            for u in all_urls:
+                prog(f"Reading {u[:70]}")
+                sources.append(source_from_url(u, prog))
+            for name, data in files:
+                sources.append(source_from_file(name, data))
+            images = [im for s in sources for im in s["images"]][:12]
+            prompt = build_prompt(preset, note, sources)
+            model = VISION_MODEL if images or preset.get("vision") else TEXT_MODEL
             out = chat(prompt, model, images or None, num_ctx=16384)
         update_run(rid, status="done", detail="", output=out)
         if email:
@@ -621,6 +700,19 @@ def run_task(rid, preset, note, urls, files, email):
         update_run(rid, status="error", detail=str(e)[:500])
 
 
+def run_chat(rid, note):
+    def prog(t):
+        update_run(rid, status="running", detail=t)
+    try:
+        prog("Waiting for the PC")
+        with pc_job(prog):
+            out = chat(note.strip(), TEXT_MODEL, num_ctx=16384)
+        update_run(rid, status="done", detail="", output=out)
+    except Exception as e:
+        log("chat failed:", repr(e))
+        update_run(rid, status="error", detail=str(e)[:500])
+
+
 def enqueue_task(preset_id, note, urls, files, email, title=None):
     preset = next((p for p in get_presets() if p["id"] == preset_id), None)
     if not preset:
@@ -628,6 +720,18 @@ def enqueue_task(preset_id, note, urls, files, email, title=None):
     first_line = note.strip().split("\n")[0][:50] if note.strip() else ""
     rid = new_run("task", title or (preset["name"] + (": " + first_line if first_line else "")))
     jobs.put(("task", rid, preset, note, urls, files, email))
+    return rid
+
+
+def enqueue_chat(note):
+    note = str(note or "").strip()[:4000]
+    if not note:
+        raise ValueError("Enter a message.")
+    with _lock:
+        if state["worker_busy"] or state["paused"] or jobs.qsize():
+            raise RuntimeError("The chatbot is unavailable while background work is active or paused.")
+    rid = new_run("chat", "Chat")
+    jobs.put(("chat", rid, note))
     return rid
 
 
@@ -774,6 +878,8 @@ def render_briefing(sections, n_articles, n_stories, when):
 
 
 def build_briefing(rid):
+    with _lock:
+        state["busy"] += 1
     try:
         s = get_briefing_settings()
         update_run(rid, status="running", detail="Fetching articles from FreshRSS")
@@ -805,6 +911,10 @@ def build_briefing(rid):
     except Exception as e:
         log("briefing failed:", repr(e))
         update_run(rid, status="error", detail=str(e)[:500])
+    finally:
+        with _lock:
+            state["busy"] -= 1
+            state["last"] = time.time()
 
 
 def send_briefing(rid):
@@ -863,12 +973,25 @@ def worker_loop():
     while True:
         job = jobs.get()
         try:
+            with _lock:
+                state["worker_busy"] = True
+            if state["paused"]:
+                jobs.put(job)
+                with _lock:
+                    state["worker_busy"] = False
+                time.sleep(1)
+                continue
             if job[0] == "build":
                 build_briefing(job[1])
             elif job[0] == "task":
                 run_task(*job[1:])
+            elif job[0] == "chat":
+                run_chat(*job[1:])
         except Exception as e:
             log("worker error:", repr(e))
+        finally:
+            with _lock:
+                state["worker_busy"] = False
 
 
 def scheduler_loop():
@@ -883,9 +1006,25 @@ def scheduler_loop():
 def init():
     sql("UPDATE runs SET status='error', detail='Interrupted by a restart' WHERE status IN ('queued','running')")
     get_presets()
+    set_paused(bool(kv_get("paused", False)))
 
 
 def system_status():
+    with _lock:
+        busy = state["busy"]
+        worker_busy = state["worker_busy"]
+        paused = state["paused"]
+        queued = jobs.qsize()
     return {"pc_up": ollama_up(), "email_ready": email_configured(), "recipients": get_recipients() if MAIL_TO or (kv_get("general") or {}).get("recipients") else [],
             "freshrss_ready": bool(FRESH_URL and FRESH_USER and FRESH_PASS),
-            "text_model": TEXT_MODEL, "vision_model": VISION_MODEL, "pc_ip": PC_IP}
+            "text_model": TEXT_MODEL, "vision_model": VISION_MODEL, "pc_ip": PC_IP,
+            "busy": busy, "worker_busy": worker_busy, "paused": paused, "queued": queued,
+            "active_sessions": pc_has_active_sessions()}
+
+
+def set_paused(paused):
+    paused = bool(paused)
+    with _lock:
+        state["paused"] = paused
+    kv_set("paused", paused)
+    return state["paused"]

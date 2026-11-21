@@ -2,6 +2,10 @@
 Turns a gaming PC into a functional AI rig that only turns on when necessary.
 # Home AI server: setup guide
 
+## First-time setup on a never-used computer
+
+The rest of this guide assumes you have never installed Docker, Ollama, Wake-on-LAN, SSH keys, FreshRSS, or this hub. Use [FIRST_TIME_SETUP.md](FIRST_TIME_SETUP.md) for one command at a time with exact prerequisites, expected output, stop conditions, and rollback steps.
+
 ## Overview
 
 Your PC only runs Ollama; a small Ubuntu server runs one Docker container that wakes the PC when there is work and powers it off when idle. You use it from a web page on your network, and your briefing arrives by email.
@@ -137,6 +141,8 @@ Three short browser jobs. Collect the values as you go; Part 3 needs all of them
 
 Wake-on-LAN stays inside your home network, so there is nothing to port-forward. Do not expose the hub's web page to the internet; it is meant for your home network only.
 
+**Secure access:** Keep the hub on LAN-only HTTP only on a trusted network, or place it behind a TLS reverse proxy. Set `HUB_COOKIE_SECURE=true` and `HUB_TLS_TERMINATED=true` when HTTPS is terminated by that proxy. Do not set `HUB_COOKIE_SECURE=false` unless you intentionally accept insecure session transport.
+
 ### 2.2 Email that can send (Gmail example)
 
 The hub sends your briefing through an SMTP account. Gmail no longer accepts your normal password for this, so you need an app password ([source](https://developer.nylas.com/docs/cookbook/email/gmail-smtp-settings.md)).
@@ -175,24 +181,18 @@ Log out and back in, then check `docker compose version`.
 
 ### 3.2 Copy the hub to the server
 
-The code (about 1,400 lines: the web page, the engine and the Docker files) is in the file **ai-hub.tar.gz**, which I sent in our chat. Download it to the computer you SSH from. Use the latest copy I sent, which includes timezone support so that \`TZ\` works. If you can't find it, ask me and I'll send it again.
-
-On that computer, in the folder where you saved it (replace `SERVER_USER` and `SERVER_IP`):
-
-```bash
-scp ai-hub.tar.gz SERVER_USER@SERVER_IP:~/
-```
-
-Then on the server:
+Clone the repository directly from GitHub on the Ubuntu server:
 
 ```bash
 cd ~
-tar xzf ai-hub.tar.gz
-mkdir -p ~/ai/data ~/ai/ssh
-ls -a ~/ai ~/ai/hub
+git clone https://github.com/ubiquitous-seal21/PC-AI-Bot.git ai
+cd ~/ai
+mkdir -p data ssh
+ls -la
+ls -la ai/hub
 ```
 
-You should see `docker-compose.yml` and `.env.example` in `~/ai`, and `Dockerfile`, `engine.py`, `app.py` and `index.html` in `~/ai/hub`.
+You should see `docker-compose.yml`, `.env.example`, and `ai/hub/`. Do not continue if the repository layout is different.
 
 ### 3.3 Your settings (.env)
 

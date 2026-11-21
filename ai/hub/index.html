@@ -40,6 +40,14 @@ pre.out{white-space:pre-wrap;font:inherit;background:var(--bg);border:1px solid 
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;display:none;max-width:90vw}
 .hide{display:none}
 table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+.workspace{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:12px}
+.side{display:flex;flex-direction:column;gap:10px;padding-top:12px}
+.widget{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.chatLog{max-height:55vh;overflow:auto}
+.chatMessage{border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0;white-space:pre-wrap}
+.chatMessage.user{border-left:3px solid var(--acc)}
+.chatMessage.ai{border-left:3px solid var(--ok)}
+@media (max-width:850px){.workspace{display:block}.side{display:none}}
 </style>
 </head>
 <body>
@@ -50,9 +58,10 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
 </div>
 
 <div id="app" class="hide">
-<header><h1>Home AI hub</h1><span id="pcState" class="pill">PC: ?</span><button class="btn alt" id="logout">Log out</button></header>
+<header><h1>Home AI hub</h1><span id="pcState" class="pill">PC: ?</span><span id="activityState" class="pill">Idle</span><button class="btn alt" id="logout">Log out</button></header>
 <main>
 <nav id="tabs"></nav>
+<div class="workspace"><div id="work">
 
 <section id="t-briefing" class="panel">
   <h2>Briefing</h2>
@@ -102,6 +111,16 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
   <p><button class="btn alt hide" id="copyOut">Copy</button></p>
 </section>
 
+<section id="t-chat" class="panel hide">
+  <h2>Chatbot</h2>
+  <p class="mute">Direct chat runs only when no background task is active.</p>
+  <div id="chatLog" class="chatLog"></div>
+  <label for="chatMessage">Message</label>
+  <textarea id="chatMessage" style="min-height:70px" placeholder="Ask a question"></textarea>
+  <p><button class="btn" id="chatSend">Send</button> <button class="btn alt" id="chatClear">Clear</button></p>
+  <div id="chatStatus" class="mute"></div>
+</section>
+
 <section id="t-sched" class="panel hide">
   <h2>Scheduled tasks</h2>
   <p class="mute">Run any preset on a schedule and get the result by email, for example a weekly meal plan.</p>
@@ -136,16 +155,22 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
 <section id="t-sys" class="panel hide">
   <h2>System</h2>
   <div id="sysInfo"></div>
-  <p><button class="btn alt" id="wakeBtn">Wake the PC</button> <button class="btn alt" id="offBtn">Power off the PC</button></p>
+  <p><button class="btn alt" id="wakeBtn">Wake the PC</button> <button class="btn alt" id="offBtn">Power off the PC</button> <button class="btn" id="pauseBtn">Pause AI</button></p>
   <p class="mute">The hub only powers off a PC it woke itself, after it has been idle. These buttons override that.</p>
 </section>
+</div><aside class="side" id="sideWidgets">
+  <div class="widget"><h2>Activity</h2><div id="widgetActivity" class="mute">Loading...</div></div>
+  <div class="widget"><h2>PC usage</h2><div id="widgetUsage" class="mute">Loading...</div></div>
+  <div class="widget"><h2>Recent errors</h2><div id="widgetErrors" class="mute">None</div></div>
+  <div class="widget"><h2>Console</h2><pre id="widgetConsole" class="out" style="max-height:180px;font-size:12px">Waiting for activity...</pre></div>
+</aside></div>
 </main>
 </div>
 <div id="toast"></div>
 
 <script>
 const $ = s => document.querySelector(s);
-const TABS = [["briefing","Briefing"],["custom","Customize"],["ask","Ask"],["sched","Scheduled"],["presets","Presets"],["hist","History"],["sys","System"]];
+const TABS = [["briefing","Briefing"],["custom","Customize"],["ask","Ask"],["chat","Chatbot"],["sched","Scheduled"],["presets","Presets"],["hist","History"],["sys","System"]];
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 let S = null, currentBriefing = null, askPoll = null, bPoll = null;
 
@@ -243,6 +268,46 @@ async function pollAsk(id){
 }
 $("#copyOut").onclick=()=>navigator.clipboard.writeText($("#askOut").textContent).then(()=>toast("Copied"));
 
+// ----- direct chatbot (exclusive of background work) -----
+let chatPoll = null;
+let chatRunId = null;
+function chatMessage(role,text){
+  $("#chatLog").append(el("div",{class:"chatMessage "+role,textContent:text}));
+  $("#chatLog").scrollTop=$("#chatLog").scrollHeight;
+}
+async function pollChat(){
+  if(!chatRunId)return;
+  clearTimeout(chatPoll);
+  const r=await api("GET","/api/runs/"+chatRunId);
+  if(r.status==="done"){
+    chatMessage("ai",r.output||"(empty)");
+    $("#chatStatus").textContent="Done";
+    $("#chatSend").disabled=false;
+    chatRunId=null;
+    return;
+  }
+  if(r.status==="error"){
+    $("#chatStatus").textContent="Failed: "+r.detail;
+    $("#chatSend").disabled=false;
+    chatRunId=null;
+    return;
+  }
+  $("#chatStatus").textContent=(r.detail||"Working")+"...";
+  chatPoll=setTimeout(pollChat,2500);
+}
+$("#chatSend").onclick=async()=>{
+  const message=$("#chatMessage").value.trim();
+  if(!message)return;
+  try{
+    const j=await api("POST","/api/chat",{message});
+    chatMessage("user",message);$("#chatMessage").value="";
+    chatRunId=j.id;$("#chatSend").disabled=true;
+    $("#chatStatus").textContent="Queued...";
+    pollChat();
+  }catch(e){toast(e.message)}
+};
+$("#chatClear").onclick=()=>{$("#chatLog").textContent="";$("#chatStatus").textContent=""};
+
 // ----- scheduled tab -----
 function fillSched(){
   const dbox=$("#sDays");if(!dbox.children.length)DAYS.forEach((d,i)=>dbox.append(el("label",{},el("input",{type:"checkbox",value:i,checked:true}),d)));
@@ -272,10 +337,13 @@ async function loadSys(){
   line("PC and Ollama",s.pc_up?"reachable":"asleep or off",s.pc_up);line("Email",s.email_ready?"configured":"not configured (see .env)",s.email_ready);
   line("Recipients",s.recipients.join(", ")||"none set",s.recipients.length>0);line("FreshRSS",s.freshrss_ready?"configured":"not configured (see .env)",s.freshrss_ready);
   line("Models",s.text_model+" (text), "+s.vision_model+" (vision)");line("PC address",s.pc_ip);
+  line("Desktop safety",s.active_sessions?"active session detected: no automatic shutdown":"no active session detected",!s.active_sessions);
+  line("AI scheduler",s.paused?"paused":"running",!s.paused);
 }
 $("#wakeBtn").onclick=async()=>{try{await api("POST","/api/pc/wake",{});toast("Magic packet sent")}catch(e){toast(e.message)}};
 $("#offBtn").onclick=async()=>{if(confirm("Power the PC off now?")){try{await api("POST","/api/pc/off",{});toast("Power-off sent")}catch(e){toast(e.message)}}};
-setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");$("#pcState").textContent="PC: "+(s.status.pc_up?"on":"off");$("#pcState").className="pill "+(s.status.pc_up?"ok":"")}catch(e){}},15000);
+$("#pauseBtn").onclick=async()=>{try{const pa=!(S&&S.status&&S.status.paused);const j=await api("PUT","/api/pc/pause",{paused:pa});S.status.paused=j.paused;$("#pauseBtn").textContent=j.paused?"Resume AI":"Pause AI";toast(j.paused?"AI paused":"AI resumed")}catch(e){toast(e.message)}};
+setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
 
 $("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};
 $("#pw").addEventListener("keydown",e=>{if(e.key==="Enter")$("#loginBtn").click()});
