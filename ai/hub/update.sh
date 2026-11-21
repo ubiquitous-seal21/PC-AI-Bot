@@ -5,6 +5,9 @@ REPO=/repo
 STATUS="$REPO/.ai-hub-update.log"
 BACKUP=$(mktemp -d)
 
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$REPO"
 git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
 
 # The helper container runs as root. Reapply the repository host owner's
