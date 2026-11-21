@@ -402,8 +402,7 @@ OLLAMA_URL=http://192.168.1.100:11434
 when upgrading an existing installation. The first upgrade stores this
 credential in the account database. Later logins use the account's stored
 password hash; the environment password is not used as a login fallback.
-Account passwords and account-scoped settings remain in `data/hub.db`, while
-the update button preserves both `.env` and `data/hub.db`.
+Account passwords and account-scoped settings remain in `data/hub.db`.
 
 Rules:
 
@@ -697,19 +696,6 @@ docker compose down
 # Start the hub again
 docker compose up -d
 ```
-
-## Updating the Hub
-
-Open **System** in the Home AI Hub and click **Update from GitHub**. The
-authenticated update action:
-
-1. Fetches and fast-forwards the current Git branch.
-2. Creates a temporary backup of `.env`, `data/hub.db`, and `ssh/`.
-3. Rebuilds and recreates only `ai-hub`.
-4. Restores the backup automatically if the pull or rebuild fails.
-
-Do not use `docker compose down -v`; that removes Docker volumes. Normal Hub
-updates do not replace `.env`, `data/hub.db`, or `ssh/`.
 
 PC and Ollama diagnostics:
 

@@ -39,14 +39,7 @@ pre.out{white-space:pre-wrap;font:inherit;background:var(--bg);border:1px solid 
 #login{max-width:340px;margin:12vh auto;padding:0 16px}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;display:none;max-width:90vw}
 .hide{display:none}
-#updateProgressBar{position:fixed;top:0;left:0;right:0;z-index:1000;display:none;background:var(--card);border-bottom:1px solid var(--line);padding:8px 16px;box-shadow:0 3px 12px rgba(0,0,0,.12)}
-#updateProgressBar .track{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:5px}
-#updateProgressBar .fill{height:100%;width:0;background:var(--acc);transition:width .35s ease}
-#updateProgressBar.failed .fill{background:var(--bad)}
-#updateProgressBar.complete .fill{background:var(--ok)}
-#updateProgressBar.running .fill{position:relative}
-#updateProgressBar.running .fill:after{content:"";position:absolute;inset:0;width:35%;background:rgba(255,255,255,.55);animation:updateSweep 1.2s linear infinite}
-@keyframes updateSweep{from{left:-35%}to{left:100%}}
+
 table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:12px}
 .side{display:flex;flex-direction:column;gap:10px;padding-top:12px}
@@ -62,10 +55,6 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
 </style>
 </head>
 <body>
-<div id="updateProgressBar" aria-live="polite">
-  <div id="updateProgressText" class="mute">Update in progress</div>
-  <div class="track"><div id="updateProgressFill" class="fill"></div></div>
-</div>
 <div id="login" class="hide">
   <div class="panel"><h2>Home AI Hub</h2>
     <label>Account</label><input id="accountName" value="" autocomplete="username">
@@ -188,27 +177,6 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
 const $ = s => document.querySelector(s);
 const TABS = [["briefing","Briefing"],["custom","Customize"],["ask","Ask"],["chat","Chatbot"],["sched","Scheduled"],["presets","Presets"],["hist","History"],["sys","System"]];
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-let S = null, currentBriefing = null, askPoll = null, bPoll = null;
-let updateHideTimer = null;
-function syncUpdateProgress(r){
-  const bar=$("#updateProgressBar"), text=$("#updateProgressText"), fill=$("#updateProgressFill");
-  if(!bar||!text||!fill)return;
-  const message=r.message||"";
-  const terminal=/^(Update complete|Update failed|Update blocked)/.test(message);
-  if(r.running||message.startsWith("Update started")||(!terminal&&message)){
-    bar.style.display="block";
-  }
-  bar.classList.toggle("failed",/^Update failed|^Update blocked/.test(message));
-  bar.classList.toggle("complete",/^Update complete/.test(message));
-  bar.classList.toggle("running",Boolean(r.running&&!terminal));
-  text.textContent=terminal?message:(message||"Update in progress");
-  fill.style.width=Math.max(1,Math.min(100,r.progress||0))+"%";
-  if(terminal){
-    clearTimeout(updateHideTimer);
-    updateHideTimer=setTimeout(()=>{bar.style.display="none";bar.classList.remove("failed","complete")},10000);
-  }
-  if(r.running===false&&!terminal)bar.style.display="none";
-}
 
 function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
 async function api(method, path, body, form){
@@ -395,61 +363,10 @@ async function loadSys(){
   line("Models",s.text_model+" (text), "+s.vision_model+" (vision)");line("PC address",s.pc_ip);
   line("Desktop safety",s.active_sessions?"active session detected: no automatic shutdown":"no active session detected",!s.active_sessions);
   line("AI scheduler",s.paused?"paused":"running",!s.paused);
-  box.append(el("div",{class:"card"},
-    el("b",{textContent:"Update"}),
-    el("p",{class:"mute",textContent:"Pull GitHub updates and rebuild the Hub automatically. Saved settings, .env, Docker data, and SSH files are preserved."}),
-    el("p",{},el("button",{id:"updateBtn",class:"btn",textContent:"Update from GitHub",on:{click:updateFromGitHub}})),
-    el("div",{id:"updateStatus",class:"mute"}),
-    el("pre",{id:"updateProcessLog",class:"out hide",style:"max-height:180px;font-size:12px"})));
-  updateStatus();
-}
-async function updateStatus(){
-  try{
-    const r=await api("GET","/api/update/status");
-    const status=$("#updateStatus");
-    if(status)status.textContent=r.message||"";
-    const processLog=$("#updateProcessLog");
-    if(processLog){
-      processLog.textContent=r.process_log||"";
-      processLog.classList.toggle("hide",!r.process_log);
-    }
-    syncUpdateProgress(r);
-    if(r.running===false&&status&&/^(Update complete|Update failed|Update blocked)/.test(r.message)){
-      const button=$("#updateBtn");if(button)button.disabled=false;
-    }
-    return r;
-  }catch(e){const status=$("#updateStatus");if(status)status.textContent=e.message;throw e}
-}
-function updateFromGitHub(){
-  if(!confirm("Pull the latest update and rebuild the Hub? Saved settings and Docker data will be preserved."))return;
-  $("#updateBtn").disabled=true;
-  $("#updateStatus").textContent="Starting update...";
-  api("POST","/api/update",{}).then(()=>{
-    toast("Update started; the Hub will reconnect shortly");
-    let attempts=0;
-    const poll=setInterval(()=>{
-      attempts++;
-      updateStatus().then(()=>{
-        const status=$("#updateStatus");
-        if(status&&/^(Update complete|Update failed|Update blocked)/.test(status.textContent)){
-          clearInterval(poll);
-          $("#updateBtn").disabled=false;
-        }
-      }).catch(()=>{});
-      if(attempts>=40){clearInterval(poll);$("#updateBtn").disabled=false;$("#updateStatus").textContent="Update status timed out. Refresh and check Docker logs."}
-    },3000);
-  }).catch(e=>{
-    $("#updateBtn").disabled=false;
-    $("#updateStatus").textContent=e.message;
-  });
 }
 $("#wakeBtn").onclick=async()=>{try{await api("POST","/api/pc/wake",{});toast("Magic packet sent")}catch(e){toast(e.message)}};
 $("#offBtn").onclick=async()=>{if(confirm("Power the PC off now?")){try{await api("POST","/api/pc/off",{});toast("Power-off sent")}catch(e){toast(e.message)}}};
 $("#pauseBtn").onclick=async()=>{try{const pa=!(S&&S.status&&S.status.paused);const j=await api("PUT","/api/pc/pause",{paused:pa});S.status.paused=j.paused;$("#pauseBtn").textContent=j.paused?"Resume AI":"Pause AI";toast(j.paused?"AI paused":"AI resumed")}catch(e){toast(e.message)}};
-setInterval(()=>{
-  if($("#app").classList.contains("hide"))return;
-  updateStatus().catch(()=>{});
-},3000);
 setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
 
 $("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{username:$("#accountName").value,password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};

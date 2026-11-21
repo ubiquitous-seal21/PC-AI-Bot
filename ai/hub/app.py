@@ -2,10 +2,8 @@
 import datetime
 import hashlib
 import os
-import subprocess
 import threading
 import time
-import re
 
 from flask import Flask, jsonify, request, send_from_directory, session
 
@@ -27,36 +25,6 @@ app.secret_key = hashlib.sha256(("hub-session|" + PASSWORD).encode()).digest()
 
 _fails = {}
 _fail_lock = threading.Lock()
-_update_lock = threading.Lock()
-_update_running = False
-UPDATE_STATUS = os.environ.get("UPDATE_STATUS", "/repo/.ai-hub-update.log")
-UPDATE_SCRIPT = os.environ.get("UPDATE_SCRIPT", "/app/update.sh")
-
-try:
-    with open(UPDATE_STATUS, "r", encoding="utf-8") as status:
-        initial_update_status = status.read().strip()
-except FileNotFoundError:
-    initial_update_status = ""
-_update_running = bool(initial_update_status.startswith(("Update started", "Update in progress")))
-
-
-def mark_update_finished(proc):
-    proc.wait()
-    global _update_running
-    deadline = time.time() + 600
-    while time.time() < deadline:
-        try:
-            with open(UPDATE_STATUS, "r", encoding="utf-8") as status:
-                message = status.read().strip()
-        except FileNotFoundError:
-            message = ""
-        if message.startswith(("Update complete:", "Update failed:", "Update blocked")):
-            with _update_lock:
-                _update_running = False
-            return
-        time.sleep(1)
-    with _update_lock:
-        _update_running = False
 
 
 def ok(**kw):
@@ -292,55 +260,6 @@ def pc_pause():
     return ok(paused=E.set_paused(raw["paused"]))
 
 
-@app.post("/api/update")
-def update_from_github():
-    global _update_running
-    with _update_lock:
-        if _update_running:
-            return ok(already_running=True)
-        if not os.path.isfile(UPDATE_SCRIPT):
-            return err("Update script is unavailable.", 500)
-        _update_running = True
-        try:
-            with open(UPDATE_STATUS, "w", encoding="utf-8") as status:
-                status.write("Update started\n")
-                status.flush()
-            log_file = open(UPDATE_STATUS + ".process", "a", encoding="utf-8")
-            proc = subprocess.Popen([UPDATE_SCRIPT], stdout=log_file, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
-            log_file.close()
-            threading.Thread(target=mark_update_finished, args=(proc,), daemon=True).start()
-        except Exception as e:
-            _update_running = False
-            return err(f"Could not start update: {e}", 500)
-    return ok(started=True)
-
-
-@app.get("/api/update/status")
-def update_status():
-    try:
-        with open(UPDATE_STATUS, "r", encoding="utf-8") as f:
-            message = f.read().strip()
-    except FileNotFoundError:
-        message = "No update has been started."
-    process_log = ""
-    try:
-        with open(UPDATE_STATUS + ".process", "r", encoding="utf-8") as f:
-            process_log = f.read()[-4000:]
-    except FileNotFoundError:
-        pass
-    progress = 5
-    if message.startswith("Update progress:"):
-        phase = re.match(r"^Update progress:(\d+):(.*)$", message, re.DOTALL)
-        if phase:
-            progress = max(5, min(95, int(phase.group(1))))
-            message = phase.group(2).strip()
-    elif message.startswith("Update complete"):
-        progress = 100
-    elif message.startswith(("Update failed", "Update blocked")):
-        progress = 100
-    return ok(message=message, process_log=process_log, running=_update_running,
-              progress=progress)
 
 
 @app.post("/api/chat")
