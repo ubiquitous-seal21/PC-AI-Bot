@@ -1,4 +1,4 @@
-"""Home AI hub engine: storage, PC power, Ollama, sources, news briefing, email, scheduler.
+"""Home AI Hub engine: storage, PC power, Ollama, sources, news briefing, email, scheduler.
 
 The gaming PC only runs Ollama. This code runs on the always-on server, wakes the
 PC with Wake-on-LAN when there is work, and powers it off again when idle.

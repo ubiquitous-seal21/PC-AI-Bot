@@ -690,6 +690,19 @@ docker compose down
 docker compose up -d
 ```
 
+## Updating the Hub
+
+Open **System** in the Home AI Hub and click **Update from GitHub**. The
+authenticated update action:
+
+1. Fetches and fast-forwards the current Git branch.
+2. Creates a temporary backup of `.env`, `data/hub.db`, and `ssh/`.
+3. Rebuilds and recreates only `ai-hub`.
+4. Restores the backup automatically if the pull or rebuild fails.
+
+Do not use `docker compose down -v`; that removes Docker volumes. Normal Hub
+updates do not replace `.env`, `data/hub.db`, or `ssh/`.
+
 PC and Ollama diagnostics:
 
 ```bash

@@ -77,6 +77,16 @@ class EngineSafetyTests(unittest.TestCase):
         self.assertEqual(settings["max_items"], 20)
         self.assertEqual(settings["focuses"], [])
 
+    def test_clean_briefing_preserves_focus_order_and_removes_duplicates(self):
+        settings = self.e.clean_briefing({
+            "focuses": [
+                {"name": "Science", "description": "Research", "count": 3},
+                {"name": "Technology", "description": "AI and hardware", "count": 5},
+                {"name": "science", "description": "Duplicate", "count": 2},
+            ],
+        })
+        self.assertEqual([f["name"] for f in settings["focuses"]], ["Science", "Technology"])
+
     def test_cluster_merges_distinctive_headlines(self):
         items = [
             {"id": "1", "title": "Major lunar mission reaches orbit", "text": "long text", "source": "A"},

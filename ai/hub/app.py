@@ -1,8 +1,9 @@
-"""Home AI hub: web server. Serves the GUI and a small JSON API."""
+"""Home AI Hub: web server. Serves the GUI and a small JSON API."""
 import datetime
 import hashlib
 import hmac
 import os
+import subprocess
 import threading
 import time
 
@@ -25,6 +26,17 @@ app.secret_key = hashlib.sha256(("hub-session|" + PASSWORD).encode()).digest()
 
 _fails = {}
 _fail_lock = threading.Lock()
+_update_lock = threading.Lock()
+_update_running = False
+UPDATE_STATUS = os.environ.get("UPDATE_STATUS", "/repo/.ai-hub-update.log")
+UPDATE_SCRIPT = os.environ.get("UPDATE_SCRIPT", "/app/update.sh")
+
+
+def mark_update_finished(proc):
+    proc.wait()
+    global _update_running
+    with _update_lock:
+        _update_running = False
 
 
 def ok(**kw):
@@ -182,7 +194,7 @@ def schedule_delete(sid):
 @app.post("/api/email/test")
 def email_test():
     try:
-        E.send_email("Home AI hub: test email", "If you can read this, email delivery works.")
+        E.send_email("Home AI Hub: test email", "If you can read this, email delivery works.")
         return ok()
     except Exception as e:
         return err(str(e))
@@ -209,6 +221,40 @@ def pc_pause():
     if "paused" not in raw:
         return err("Missing paused value.")
     return ok(paused=E.set_paused(raw["paused"]))
+
+
+@app.post("/api/update")
+def update_from_github():
+    global _update_running
+    with _update_lock:
+        if _update_running:
+            return ok(already_running=True)
+        if not os.path.isfile(UPDATE_SCRIPT):
+            return err("Update script is unavailable.", 500)
+        _update_running = True
+        try:
+            with open(UPDATE_STATUS, "w", encoding="utf-8") as status:
+                status.write("Update started\n")
+                status.flush()
+            log_file = open(UPDATE_STATUS + ".process", "a", encoding="utf-8")
+            proc = subprocess.Popen([UPDATE_SCRIPT], stdout=log_file, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+            log_file.close()
+            threading.Thread(target=mark_update_finished, args=(proc,), daemon=True).start()
+        except Exception as e:
+            _update_running = False
+            return err(f"Could not start update: {e}", 500)
+    return ok(started=True)
+
+
+@app.get("/api/update/status")
+def update_status():
+    try:
+        with open(UPDATE_STATUS, "r", encoding="utf-8") as f:
+            message = f.read().strip()
+    except FileNotFoundError:
+        message = "No update has been started."
+    return ok(message=message)
 
 
 @app.post("/api/chat")

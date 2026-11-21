@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Home AI hub</title>
+<title>Home AI Hub</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--ink:#1b1f24;--mute:#667085;--line:#e3e6ea;--acc:#0b57d0;--ok:#127a3d;--bad:#b42318}
 @media (prefers-color-scheme:dark){:root{--bg:#14171b;--card:#1c2026;--ink:#e8eaed;--mute:#9aa3ad;--line:#2d333b;--acc:#7ab0ff;--ok:#5fd08a;--bad:#ff8a80}}
@@ -47,18 +47,21 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
 .chatMessage{border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0;white-space:pre-wrap}
 .chatMessage.user{border-left:3px solid var(--acc)}
 .chatMessage.ai{border-left:3px solid var(--ok)}
+.dragHandle{cursor:grab;user-select:none;color:var(--mute);font-size:18px;line-height:1;padding:6px 4px}
+.focusCard.dragging{opacity:.45}
+.focusCard.dragOver{outline:2px dashed var(--acc);outline-offset:-2px}
 @media (max-width:850px){.workspace{display:block}.side{display:none}}
 </style>
 </head>
 <body>
 <div id="login" class="hide">
-  <div class="panel"><h2>Home AI hub</h2>
+  <div class="panel"><h2>Home AI Hub</h2>
     <label>Password</label><input id="pw" type="password" autocomplete="current-password">
     <p><button class="btn" id="loginBtn">Log in</button></p><div id="loginErr" class="bad"></div></div>
 </div>
 
 <div id="app" class="hide">
-<header><h1>Home AI hub</h1><span id="pcState" class="pill">PC: ?</span><span id="activityState" class="pill">Idle</span><button class="btn alt" id="logout">Log out</button></header>
+<header><h1>Home AI Hub</h1><span id="pcState" class="pill">PC: ?</span><span id="activityState" class="pill">Idle</span><button class="btn alt" id="logout">Log out</button></header>
 <main>
 <nav id="tabs"></nav>
 <div class="workspace"><div id="work">
@@ -223,9 +226,21 @@ $("#sendBtn").onclick=async()=>{if(!currentBriefing)return;try{await api("POST",
 
 // ----- customize tab -----
 function focusRow(f){
-  const row=el("div",{class:"card"});
+  const row=el("div",{class:"card focusCard",draggable:true});
   const n=el("input",{value:f.name,placeholder:"Name, e.g. Technology"}),d=el("input",{value:f.description,placeholder:"What belongs here, in plain words"}),c=el("input",{type:"number",min:1,max:20,value:f.count});
-  row.append(el("div",{class:"row"},el("div",{},el("label",{textContent:"Name"}),n),el("div",{},el("label",{textContent:"What it covers"}),d),el("div",{class:"fixed",style:"width:90px"},el("label",{textContent:"Stories"}),c),el("div",{class:"fixed"},el("button",{class:"btn del",textContent:"Remove",on:{click:()=>row.remove()}}))));
+  row.append(el("div",{class:"row"},el("div",{class:"fixed dragHandle",title:"Drag to reorder",textContent:"::"}),el("div",{},el("label",{textContent:"Name"}),n),el("div",{},el("label",{textContent:"What it covers"}),d),el("div",{class:"fixed",style:"width:90px"},el("label",{textContent:"Stories"}),c),el("div",{class:"fixed"},el("button",{class:"btn del",textContent:"Remove",on:{click:()=>row.remove()}}))));
+  row.addEventListener("dragstart",()=>row.classList.add("dragging"));
+  row.addEventListener("dragend",()=>row.classList.remove("dragging"));
+  row.addEventListener("dragover",e=>{e.preventDefault();row.classList.add("dragOver")});
+  row.addEventListener("dragleave",()=>row.classList.remove("dragOver"));
+  row.addEventListener("drop",e=>{
+    e.preventDefault();row.classList.remove("dragOver");
+    const box=$("#focuses"),dragging=box.querySelector(".dragging");
+    if(dragging&&dragging!==row){
+      const rows=[...box.children],dragIndex=rows.indexOf(dragging),dropIndex=rows.indexOf(row);
+      box.insertBefore(dragging,dropIndex>dragIndex?row.nextSibling:row);
+    }
+  });
   row.get=()=>({name:n.value,description:d.value,count:+c.value||4});return row;
 }
 function fillCustom(){
@@ -339,11 +354,36 @@ async function loadSys(){
   line("Models",s.text_model+" (text), "+s.vision_model+" (vision)");line("PC address",s.pc_ip);
   line("Desktop safety",s.active_sessions?"active session detected: no automatic shutdown":"no active session detected",!s.active_sessions);
   line("AI scheduler",s.paused?"paused":"running",!s.paused);
+  box.append(el("div",{class:"card"},
+    el("b",{textContent:"Update"}),
+    el("p",{class:"mute",textContent:"Pull GitHub updates and rebuild the Hub automatically. Saved settings, .env, Docker data, and SSH files are preserved."}),
+    el("p",{},el("button",{id:"updateBtn",class:"btn",textContent:"Update from GitHub",on:{click:updateFromGitHub}})),
+    el("div",{id:"updateStatus",class:"mute"})));
+  updateStatus();
+}
+async function updateStatus(){
+  try{
+    const r=await api("GET","/api/update/status");
+    const status=$("#updateStatus");
+    if(status)status.textContent=r.message||"";
+  }catch(e){const status=$("#updateStatus");if(status)status.textContent=e.message}
+}
+function updateFromGitHub(){
+  if(!confirm("Pull the latest update and rebuild the Hub? Saved settings and Docker data will be preserved."))return;
+  $("#updateBtn").disabled=true;
+  $("#updateStatus").textContent="Starting update...";
+  api("POST","/api/update",{}).then(()=>{
+    toast("Update started; the Hub will reconnect shortly");
+    setTimeout(updateStatus,3000);
+  }).catch(e=>{
+    $("#updateBtn").disabled=false;
+    $("#updateStatus").textContent=e.message;
+  });
 }
 $("#wakeBtn").onclick=async()=>{try{await api("POST","/api/pc/wake",{});toast("Magic packet sent")}catch(e){toast(e.message)}};
 $("#offBtn").onclick=async()=>{if(confirm("Power the PC off now?")){try{await api("POST","/api/pc/off",{});toast("Power-off sent")}catch(e){toast(e.message)}}};
 $("#pauseBtn").onclick=async()=>{try{const pa=!(S&&S.status&&S.status.paused);const j=await api("PUT","/api/pc/pause",{paused:pa});S.status.paused=j.paused;$("#pauseBtn").textContent=j.paused?"Resume AI":"Pause AI";toast(j.paused?"AI paused":"AI resumed")}catch(e){toast(e.message)}};
-setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
+setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
 
 $("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};
 $("#pw").addEventListener("keydown",e=>{if(e.key==="Enter")$("#loginBtn").click()});
