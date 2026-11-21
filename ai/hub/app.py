@@ -328,7 +328,24 @@ def update_status():
             process_log = f.read()[-4000:]
     except FileNotFoundError:
         pass
-    return ok(message=message, process_log=process_log, running=_update_running)
+    if message.startswith("Update complete"):
+        progress = 100
+    elif message.startswith("Update failed") or message.startswith("Update blocked"):
+        progress = 100
+    elif "Docker daemon" in message or "container rebuild" in message:
+        progress = 90
+    elif "GitHub" in message or "fetch" in message:
+        progress = 35
+    elif "pull" in message.lower() or "revision" in message.lower():
+        progress = 60
+    elif "preserve" in message.lower():
+        progress = 20
+    elif "started" in message.lower():
+        progress = 10
+    else:
+        progress = 5
+    return ok(message=message, process_log=process_log, running=_update_running,
+              progress=progress)
 
 
 @app.post("/api/chat")

@@ -60,7 +60,7 @@ mkdir -p "$BACKUP/data" "$BACKUP/ssh"
 [ -f "$REPO/data/hub.db" ] && cp "$REPO/data/hub.db" "$BACKUP/hub.db"
 [ -d "$REPO/ssh" ] && cp -a "$REPO/ssh/." "$BACKUP/ssh/"
 
-printf 'Update started\n' > "$STATUS"
+printf 'Update started: preparing backup\n' > "$STATUS"
 
 if ! docker info >/dev/null 2>&1; then
   printf 'Update failed: Docker daemon is unavailable from the Hub container\n' > "$STATUS"
@@ -81,6 +81,7 @@ if [ -n "$LOCAL_CHANGES" ]; then
   fi
   SOURCE_STASHED=1
 fi
+printf 'Update progress: preserving local changes\n' > "$STATUS"
 
 FETCH_ERR=$(mktemp)
 if ! git -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune origin 2>"$FETCH_ERR"; then
@@ -91,6 +92,7 @@ if ! git -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune o
     printf 'Update failed: could not fetch GitHub\n' > "$STATUS"
   fi
   rm -f "$FETCH_ERR"
+  printf 'Update progress: GitHub fetch complete\n' > "$STATUS"
   if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
   restore_settings
   exit 1
@@ -110,8 +112,10 @@ else
   restore_settings
   exit 1
 fi
+printf 'Update progress: pulling latest source\n' > "$STATUS"
 
 restore_settings
+printf 'Update progress: rebuilding the Hub\n' > "$STATUS"
 
 if docker compose -f "$REPO/docker-compose.yml" --project-name ai-hub --project-directory "$REPO" up -d --build --force-recreate --remove-orphans ai-hub; then
   printf 'Update complete: %s\n' "$(git -C "$REPO" rev-parse --short HEAD)" > "$STATUS"
