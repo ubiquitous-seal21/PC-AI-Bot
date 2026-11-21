@@ -32,11 +32,11 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   HELPER="ai-hub-updater-$$"
   if docker rm -f "$HELPER" >/dev/null 2>&1; then :; fi
   printf 'Update started in a helper container\n' > "$STATUS"
-  if docker run -d --name "$HELPER" --rm \
+  if docker run -d --name "$HELPER" --network host --rm \
     -e AI_HUB_UPDATE_HELPER=1 \
     -v "$REPO_SOURCE:/repo:rw" \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    "$IMAGE" sh -c 'exec /app/update.sh' >/dev/null; then
+    "$IMAGE" sh -c 'exec /repo/ai/hub/update.sh' >/dev/null; then
     exit 0
   fi
   printf 'Update failed: could not start the update helper\n' > "$STATUS"
@@ -82,12 +82,20 @@ if [ -n "$LOCAL_CHANGES" ]; then
   SOURCE_STASHED=1
 fi
 
-if ! git -C "$REPO" fetch origin; then
-  printf 'Update failed: could not fetch GitHub\n' > "$STATUS"
+FETCH_ERR=$(mktemp)
+if ! git -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune origin 2>"$FETCH_ERR"; then
+  FETCH_DETAIL=$(tail -n 3 "$FETCH_ERR" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+  if [ -n "$FETCH_DETAIL" ]; then
+    printf 'Update failed: could not fetch GitHub: %s\n' "$FETCH_DETAIL" > "$STATUS"
+  else
+    printf 'Update failed: could not fetch GitHub\n' > "$STATUS"
+  fi
+  rm -f "$FETCH_ERR"
   if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
   restore_settings
   exit 1
 fi
+rm -f "$FETCH_ERR"
 
 if [ -n "$BRANCH" ]; then
   if ! git -C "$REPO" pull --ff-only origin "$BRANCH"; then
