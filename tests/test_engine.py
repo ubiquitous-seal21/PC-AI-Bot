@@ -36,7 +36,9 @@ class EngineSafetyTests(unittest.TestCase):
         try:
             self.e.PC_MAC = "AA:BB:CC:DD:EE:FF"
             self.e.LAN_BROADCAST = "192.168.1.255"
-            with patch.object(self.e.socket, "socket") as socket_factory:
+            with patch.object(self.e.socket, "socket") as socket_factory, patch.object(
+                self.e.os.path, "exists", return_value=False
+            ):
                 sock = socket_factory.return_value
                 self.e.send_magic()
                 sent_addresses = [call.args[1][0] for call in sock.sendto.call_args_list]

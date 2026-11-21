@@ -464,13 +464,46 @@ def send_magic():
     if not addresses:
         raise ValueError("LAN_BROADCAST is empty")
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sent_directly = False
     try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         for addr in addresses:
             s.sendto(pkt, (addr, 9))
+        sent_directly = True
+    except OSError as e:
+        log("direct Wake-on-LAN send failed:", e)
     finally:
-        s.close()
+        if "s" in locals():
+            s.close()
+
+    if os.path.exists("/var/run/docker.sock"):
+        try:
+            image_result = run(["docker", "inspect", "ai-hub", "--format", "{{.Image}}"], 10)
+            if image_result.returncode == 0:
+                image = image_result.stdout.strip()
+                mac = re.sub(r"[^0-9a-fA-F]", "", PC_MAC)
+                code = (
+                    "import socket,sys;"
+                    "mac=bytes.fromhex(sys.argv[1]);"
+                    "packet=b'\\xff'*6+mac*16;"
+                    "addresses=[x for x in sys.argv[2:] if x];"
+                    "sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                    "sock.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1);"
+                    "[sock.sendto(packet,(addr,9)) for addr in addresses];"
+                    "sock.close()"
+                )
+                helper = run([
+                    "docker", "run", "--rm", "--network", "host",
+                    "--entrypoint", "python", image, "-c", code, mac, *addresses
+                ], 20)
+                if helper.returncode == 0:
+                    sent_directly = True
+        except Exception as e:
+            log("host-network Wake-on-LAN helper failed:", e)
+
+    if not sent_directly:
+        raise RuntimeError("Could not send Wake-on-LAN magic packet")
 
 
 def ensure_pc(timeout=300):
