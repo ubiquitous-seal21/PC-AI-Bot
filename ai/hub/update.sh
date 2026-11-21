@@ -7,8 +7,11 @@ BACKUP=$(mktemp -d)
 
 export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0=safe.directory
-export GIT_CONFIG_VALUE_0="$REPO"
-git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
+export GIT_CONFIG_VALUE_0='*'
+git_safe() {
+  git -c safe.directory='*' "$@"
+}
+git_safe config --global --add safe.directory '*' >/dev/null 2>&1 || true
 
 # The helper container runs as root. Reapply the repository host owner's
 # UID/GID so Git remains writable after the helper has fetched or stashed files.
@@ -41,7 +44,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   if [ -f "$REPO_HOME/.gitconfig" ] && [ -d "$REPO_HOME/.config/gh" ]; then
     docker run -d --name "$HELPER" --network host --rm \
       -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
-      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
       -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
@@ -52,7 +55,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   elif [ -f "$REPO_HOME/.gitconfig" ] && [ -f "$REPO_HOME/.git-credentials" ]; then
     docker run -d --name "$HELPER" --network host --rm \
       -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
-      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
       -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
@@ -63,7 +66,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   elif [ -f "$REPO_HOME/.gitconfig" ]; then
     docker run -d --name "$HELPER" --network host --rm \
       -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
-      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
       -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
@@ -73,7 +76,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   else
     docker run -d --name "$HELPER" --network host --rm \
       -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
-      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
       -v /var/run/docker.sock:/var/run/docker.sock \
@@ -109,13 +112,13 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-OLD_HEAD=$(git -C "$REPO" rev-parse HEAD)
-BRANCH=$(git -C "$REPO" branch --show-current)
-LOCAL_CHANGES="$(git -C "$REPO" status --porcelain)"
+OLD_HEAD=$(git_safe -C "$REPO" rev-parse HEAD)
+BRANCH=$(git_safe -C "$REPO" branch --show-current)
+LOCAL_CHANGES="$(git_safe -C "$REPO" status --porcelain)"
 SOURCE_STASHED=0
 
 if [ -n "$LOCAL_CHANGES" ]; then
-  if ! git -C "$REPO" stash push --include-untracked -m "PC-AI-Bot pre-update source backup"; then
+  if ! git_safe -C "$REPO" stash push --include-untracked -m "PC-AI-Bot pre-update source backup"; then
     printf 'Update failed: could not preserve local source changes\n' > "$STATUS"
     restore_settings
     exit 1
@@ -125,7 +128,7 @@ fi
 printf 'Update progress:25:Preserving local source changes\n' > "$STATUS"
 
 FETCH_ERR=$(mktemp)
-if ! git -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune origin 2>"$FETCH_ERR"; then
+if ! git_safe -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune origin 2>"$FETCH_ERR"; then
   FETCH_DETAIL=$(tail -n 3 "$FETCH_ERR" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
   if [ -n "$FETCH_DETAIL" ]; then
     printf 'Update failed: could not fetch GitHub: %s\n' "$FETCH_DETAIL" > "$STATUS"
@@ -133,7 +136,7 @@ if ! git -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune o
     printf 'Update failed: could not fetch GitHub\n' > "$STATUS"
   fi
   rm -f "$FETCH_ERR"
-  if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
+  if [ "$SOURCE_STASHED" -eq 1 ]; then git_safe -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
   restore_settings
   exit 1
 fi
@@ -141,15 +144,15 @@ rm -f "$FETCH_ERR"
 printf 'Update progress:45:Fetching GitHub changes\n' > "$STATUS"
 
 if [ -n "$BRANCH" ]; then
-  if ! git -C "$REPO" pull --ff-only origin "$BRANCH"; then
+  if ! git_safe -C "$REPO" pull --ff-only origin "$BRANCH"; then
     printf 'Update failed: GitHub pull was not fast-forwardable\n' > "$STATUS"
-    if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
+    if [ "$SOURCE_STASHED" -eq 1 ]; then git_safe -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
     restore_settings
     exit 1
   fi
 else
   printf 'Update failed: repository is in detached HEAD state\n' > "$STATUS"
-  if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
+  if [ "$SOURCE_STASHED" -eq 1 ]; then git_safe -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
   restore_settings
   exit 1
 fi
@@ -159,12 +162,12 @@ restore_settings
 printf 'Update progress:90:Rebuilding the Hub\n' > "$STATUS"
 
 if docker compose -f "$REPO/docker-compose.yml" --project-name ai-hub --project-directory "$REPO" up -d --build --force-recreate --remove-orphans ai-hub; then
-  printf 'Update complete: %s\n' "$(git -C "$REPO" rev-parse --short HEAD)" > "$STATUS"
+  printf 'Update complete: %s\n' "$(git_safe -C "$REPO" rev-parse --short HEAD)" > "$STATUS"
   rm -rf "$BACKUP"
   exit 0
 fi
 
-printf 'Update failed: container rebuild failed; previous data and settings restored; revision was %s\n' "$(git -C "$REPO" rev-parse --short "$OLD_HEAD")" > "$STATUS"
+printf 'Update failed: container rebuild failed; previous data and settings restored; revision was %s\n' "$(git_safe -C "$REPO" rev-parse --short "$OLD_HEAD")" > "$STATUS"
 restore_settings
 rm -rf "$BACKUP"
 exit 1
