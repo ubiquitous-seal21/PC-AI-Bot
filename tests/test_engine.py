@@ -108,6 +108,16 @@ class EngineSafetyTests(unittest.TestCase):
         self.assertTrue(self.e.set_paused(True))
         self.assertFalse(self.e.set_paused(False))
 
+    def test_accounts_are_separate_and_passwords_are_verified_by_hash(self):
+        first = self.e.create_account("Alice", "alice-password")
+        second = self.e.create_account("Bob", "bob-password")
+        self.assertIsNotNone(self.e.verify_account("Alice", "alice-password"))
+        self.assertIsNone(self.e.verify_account("Alice", "wrong-password"))
+        self.e.save_general({"recipients": "alice@example.com"}, first["id"])
+        self.e.save_general({"recipients": "bob@example.com"}, second["id"])
+        self.assertEqual(self.e.get_recipients(first["id"]), ["alice@example.com"])
+        self.assertEqual(self.e.get_recipients(second["id"]), ["bob@example.com"])
+
 
 if __name__ == "__main__":
     unittest.main()

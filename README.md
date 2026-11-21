@@ -369,6 +369,7 @@ Enter real values. Example:
 ```dotenv
 TZ=America/New_York
 HUB_PASSWORD=use-a-long-random-password
+HUB_ACCOUNT_NAME=admin
 HUB_COOKIE_SECURE=false
 HUB_TLS_TERMINATED=false
 PORT=8088
@@ -396,6 +397,13 @@ TEXT_MODEL=qwen3:8b
 VISION_MODEL=qwen2.5vl:7b
 OLLAMA_URL=http://192.168.1.100:11434
 ```
+
+`HUB_ACCOUNT_NAME` and `HUB_PASSWORD` create and bootstrap the initial account
+when upgrading an existing installation. The first upgrade stores this
+credential in the account database. Later logins use the account's stored
+password hash; the environment password is not used as a login fallback.
+Account passwords and account-scoped settings remain in `data/hub.db`, while
+the update button preserves both `.env` and `data/hub.db`.
 
 Rules:
 

@@ -9,6 +9,7 @@ import copy
 import datetime
 import glob
 import hashlib
+import hmac
 import html
 import io
 import ipaddress
@@ -73,12 +74,19 @@ _lock = threading.RLock()
 _cfg_lock = threading.Lock()
 _db.executescript("""
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS accounts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL, salt TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, title TEXT, created REAL,
   status TEXT, detail TEXT DEFAULT '', output TEXT DEFAULT '', extra TEXT DEFAULT '',
   emailed INTEGER DEFAULT 0, auto INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS scores(item_id TEXT, fhash TEXT, data TEXT, PRIMARY KEY(item_id, fhash));
 """)
+run_columns = {r["name"] for r in _db.execute("PRAGMA table_info(runs)").fetchall()}
+if "account_id" not in run_columns:
+    _db.execute("ALTER TABLE runs ADD COLUMN account_id INTEGER")
+_db.commit()
 
 
 def sql(query, args=()):
@@ -98,10 +106,78 @@ def kv_set(key, value):
         (key, json.dumps(value)))
 
 
-def new_run(kind, title, auto=0):
+# ---------- accounts ----------
+def account_key(account_id, key):
+    return f"account:{int(account_id)}:{key}"
+
+
+def account_kv_get(account_id, key, default=None):
+    return kv_get(account_key(account_id, key), default)
+
+
+def account_kv_set(account_id, key, value):
+    kv_set(account_key(account_id, key), value)
+
+
+def _password_hash(password, salt):
+    return hashlib.pbkdf2_hmac("sha256", str(password).encode(), salt.encode(), 120000).hex()
+
+
+def ensure_default_account(password, name="admin"):
+    rows = sql("SELECT id FROM accounts ORDER BY id LIMIT 1")
+    if rows:
+        return rows[0]["id"]
+    salt = uuid.uuid4().hex
     with _lock:
-        cur = _db.execute("INSERT INTO runs(kind,title,created,status,auto) VALUES(?,?,?,?,?)",
-                          (kind, title, time.time(), "queued", auto))
+        cur = _db.execute(
+            "INSERT INTO accounts(name,password_hash,salt,created) VALUES(?,?,?,?)",
+            (str(name).strip()[:60] or "admin", _password_hash(password, salt), salt, time.time()))
+        _db.commit()
+        aid = cur.lastrowid
+    return aid
+
+
+def list_accounts():
+    return sql("SELECT id,name,created FROM accounts ORDER BY id")
+
+
+def get_account(account_id):
+    rows = sql("SELECT id,name,created FROM accounts WHERE id=?", (account_id,))
+    return rows[0] if rows else None
+
+
+def create_account(name, password):
+    name = str(name).strip()[:60]
+    if len(name) < 2:
+        raise ValueError("Account name must be at least 2 characters.")
+    if len(str(password)) < 8:
+        raise ValueError("Password must be at least 8 characters.")
+    if sql("SELECT id FROM accounts WHERE lower(name)=lower(?)", (name,)):
+        raise ValueError("An account with that name already exists.")
+    salt = uuid.uuid4().hex
+    with _lock:
+        cur = _db.execute(
+            "INSERT INTO accounts(name,password_hash,salt,created) VALUES(?,?,?,?)",
+            (name, _password_hash(password, salt), salt, time.time()))
+        _db.commit()
+        aid = cur.lastrowid
+    return {"id": aid, "name": name, "created": time.time()}
+
+
+def verify_account(name, password):
+    rows = sql("SELECT id,name,password_hash,salt FROM accounts WHERE lower(name)=lower(?)", (str(name).strip(),))
+    if not rows:
+        return None
+    row = rows[0]
+    if hmac.compare_digest(row["password_hash"], _password_hash(password, row["salt"])):
+        return {"id": row["id"], "name": row["name"]}
+    return None
+
+
+def new_run(kind, title, auto=0, account_id=None):
+    with _lock:
+        cur = _db.execute("INSERT INTO runs(kind,title,created,status,auto,account_id) VALUES(?,?,?,?,?,?)",
+                          (kind, title, time.time(), "queued", auto, account_id))
         _db.commit()
         return cur.lastrowid
 
@@ -112,13 +188,20 @@ def update_run(rid, **fields):
             (*fields.values(), rid))
 
 
-def get_run(rid):
-    rows = sql("SELECT * FROM runs WHERE id=?", (rid,))
+def get_run(rid, account_id=None):
+    if account_id is None:
+        rows = sql("SELECT * FROM runs WHERE id=?", (rid,))
+    else:
+        rows = sql("SELECT * FROM runs WHERE id=? AND account_id=?", (rid, account_id))
     return rows[0] if rows else None
 
 
-def list_runs(kind=None, limit=60):
+def list_runs(kind=None, limit=60, account_id=None):
     cols = "id,kind,title,created,status,detail,emailed"
+    if account_id is not None:
+        if kind:
+            return sql(f"SELECT {cols} FROM runs WHERE kind=? AND account_id=? ORDER BY id DESC LIMIT ?", (kind, account_id, limit))
+        return sql(f"SELECT {cols} FROM runs WHERE account_id=? ORDER BY id DESC LIMIT ?", (account_id, limit))
     if kind:
         return sql(f"SELECT {cols} FROM runs WHERE kind=? ORDER BY id DESC LIMIT ?", (kind, limit))
     return sql(f"SELECT {cols} FROM runs ORDER BY id DESC LIMIT ?", (limit,))
@@ -175,13 +258,17 @@ def clean_briefing(raw):
     return s
 
 
-def get_briefing_settings():
-    return clean_briefing(kv_get("briefing", {}) or {})
+def get_briefing_settings(account_id=None):
+    if account_id is None:
+        return clean_briefing(kv_get("briefing", {}) or {})
+    return clean_briefing(account_kv_get(account_id, "briefing", {}) or {})
 
-
-def save_briefing_settings(raw):
+def save_briefing_settings(raw, account_id=None):
     s = clean_briefing(raw)
-    kv_set("briefing", s)
+    if account_id is None:
+        kv_set("briefing", s)
+    else:
+        account_kv_set(account_id, "briefing", s)
     return s
 
 
@@ -193,14 +280,18 @@ def parse_emails(text):
     return parts
 
 
-def get_recipients():
-    mine = parse_emails((kv_get("general", {}) or {}).get("recipients", ""))
+def get_recipients(account_id=None):
+    general = account_kv_get(account_id, "general", {}) if account_id is not None else kv_get("general", {}) or {}
+    mine = parse_emails(general.get("recipients", "") if general else "")
     return mine or parse_emails(MAIL_TO)
 
 
-def save_general(raw):
+def save_general(raw, account_id=None):
     emails = parse_emails(raw.get("recipients", ""))
-    kv_set("general", {"recipients": ", ".join(emails)})
+    if account_id is None:
+        kv_set("general", {"recipients": ", ".join(emails)})
+    else:
+        account_kv_set(account_id, "general", {"recipients": ", ".join(emails)})
     return {"recipients": ", ".join(emails)}
 
 
@@ -233,22 +324,25 @@ BUILTIN_PRESETS = [
 ]
 
 
-def get_presets():
+def get_presets(account_id=None):
     with _cfg_lock:
-        p = kv_get("presets")
+        p = account_kv_get(account_id, "presets") if account_id is not None else kv_get("presets")
         if p is None:
             p = copy.deepcopy(BUILTIN_PRESETS)
-            kv_set("presets", p)
+            if account_id is None:
+                kv_set("presets", p)
+            else:
+                account_kv_set(account_id, "presets", p)
         return p
 
 
-def save_preset(raw):
+def save_preset(raw, account_id=None):
     name = str(raw.get("name", "")).strip()[:80]
     instruction = str(raw.get("instruction", "")).strip()[:4000]
     if not name or not instruction:
         raise ValueError("A preset needs a name and instructions.")
     with _cfg_lock:
-        presets = kv_get("presets") or copy.deepcopy(BUILTIN_PRESETS)
+        presets = get_presets(account_id)
         pid = str(raw.get("id") or uuid.uuid4().hex[:8])
         item = {"id": pid, "name": name, "instruction": instruction, "vision": bool(raw.get("vision"))}
         for i, p in enumerate(presets):
@@ -257,21 +351,29 @@ def save_preset(raw):
                 break
         else:
             presets.append(item)
-        kv_set("presets", presets)
+        if account_id is None:
+            kv_set("presets", presets)
+        else:
+            account_kv_set(account_id, "presets", presets)
     return item
 
 
-def delete_preset(pid):
+def delete_preset(pid, account_id=None):
     with _cfg_lock:
-        kv_set("presets", [p for p in (kv_get("presets") or []) if p["id"] != pid])
+        presets = [p for p in get_presets(account_id) if p["id"] != pid]
+        if account_id is None:
+            kv_set("presets", presets)
+        else:
+            account_kv_set(account_id, "presets", presets)
 
 
-def get_schedules():
-    return kv_get("schedules", []) or []
+def get_schedules(account_id=None):
+    return (account_kv_get(account_id, "schedules", []) if account_id is not None
+            else kv_get("schedules", [])) or []
 
 
-def save_schedule(raw):
-    if not any(p["id"] == raw.get("preset_id") for p in get_presets()):
+def save_schedule(raw, account_id=None):
+    if not any(p["id"] == raw.get("preset_id") for p in get_presets(account_id)):
         raise ValueError("Pick a preset for this scheduled task.")
     days = sorted({d for d in (raw.get("days") or []) if isinstance(d, int) and 0 <= d <= 6})
     item = {
@@ -283,7 +385,7 @@ def save_schedule(raw):
         "enabled": bool(raw.get("enabled", True)), "last_run": "",
     }
     with _cfg_lock:
-        items = get_schedules()
+        items = get_schedules(account_id)
         for i, s in enumerate(items):
             if s["id"] == item["id"]:
                 item["last_run"] = s.get("last_run", "")
@@ -291,13 +393,20 @@ def save_schedule(raw):
                 break
         else:
             items.append(item)
-        kv_set("schedules", items)
+        if account_id is None:
+            kv_set("schedules", items)
+        else:
+            account_kv_set(account_id, "schedules", items)
     return item
 
 
-def delete_schedule(sid):
+def delete_schedule(sid, account_id=None):
     with _cfg_lock:
-        kv_set("schedules", [s for s in get_schedules() if s["id"] != sid])
+        items = [s for s in get_schedules(account_id) if s["id"] != sid]
+        if account_id is None:
+            kv_set("schedules", items)
+        else:
+            account_kv_set(account_id, "schedules", items)
 
 
 # ---------- small helpers ----------
@@ -641,8 +750,8 @@ def email_configured():
     return bool(SMTP_HOST and MAIL_FROM)
 
 
-def send_email(subject, text, html_body=None, to=None):
-    to = to or get_recipients()
+def send_email(subject, text, html_body=None, to=None, account_id=None):
+    to = to or get_recipients(account_id)
     if not to:
         raise RuntimeError("No recipient set. Add one on the Customize tab.")
     if not email_configured():
@@ -691,7 +800,8 @@ def run_task(rid, preset, note, urls, files, email):
         update_run(rid, status="done", detail="", output=out)
         if email:
             try:
-                send_email(get_run(rid)["title"], out, text_as_html(out))
+                r = get_run(rid)
+                send_email(r["title"], out, text_as_html(out), account_id=r.get("account_id"))
                 update_run(rid, emailed=1, detail="Emailed")
             except Exception as e:
                 update_run(rid, detail=f"Email failed: {e}")
@@ -713,24 +823,24 @@ def run_chat(rid, note):
         update_run(rid, status="error", detail=str(e)[:500])
 
 
-def enqueue_task(preset_id, note, urls, files, email, title=None):
-    preset = next((p for p in get_presets() if p["id"] == preset_id), None)
+def enqueue_task(preset_id, note, urls, files, email, title=None, account_id=None):
+    preset = next((p for p in get_presets(account_id) if p["id"] == preset_id), None)
     if not preset:
         raise ValueError("Unknown preset")
     first_line = note.strip().split("\n")[0][:50] if note.strip() else ""
-    rid = new_run("task", title or (preset["name"] + (": " + first_line if first_line else "")))
+    rid = new_run("task", title or (preset["name"] + (": " + first_line if first_line else "")), account_id=account_id)
     jobs.put(("task", rid, preset, note, urls, files, email))
     return rid
 
 
-def enqueue_chat(note):
+def enqueue_chat(note, account_id=None):
     note = str(note or "").strip()[:4000]
     if not note:
         raise ValueError("Enter a message.")
     with _lock:
         if state["worker_busy"] or state["paused"] or jobs.qsize():
             raise RuntimeError("The chatbot is unavailable while background work is active or paused.")
-    rid = new_run("chat", "Chat")
+    rid = new_run("chat", "Chat", account_id=account_id)
     jobs.put(("chat", rid, note))
     return rid
 
@@ -881,7 +991,8 @@ def build_briefing(rid):
     with _lock:
         state["busy"] += 1
     try:
-        s = get_briefing_settings()
+        r = get_run(rid)
+        s = get_briefing_settings(r.get("account_id"))
         update_run(rid, status="running", detail="Fetching articles from FreshRSS")
         items = fresh_items(s)
         when = datetime.datetime.now().strftime("%A %d %B %Y")
@@ -921,12 +1032,12 @@ def send_briefing(rid):
     r = get_run(rid)
     if not r or r["status"] not in ("ready", "sent"):
         raise RuntimeError("That briefing is not ready yet.")
-    send_email(r["title"], r["extra"] or strip_html(r["output"]), r["output"])
+    send_email(r["title"], r["extra"] or strip_html(r["output"]), r["output"], account_id=r.get("account_id"))
     update_run(rid, status="sent", emailed=1)
 
 
-def enqueue_briefing(auto=0):
-    rid = new_run("briefing", "Briefing " + datetime.date.today().strftime("%a %d %b"), auto=auto)
+def enqueue_briefing(auto=0, account_id=None):
+    rid = new_run("briefing", "Briefing " + datetime.date.today().strftime("%a %d %b"), auto=auto, account_id=account_id)
     jobs.put(("build", rid))
     return rid
 
@@ -937,36 +1048,40 @@ def tick(now=None):
     now = now or datetime.datetime.now()
     today = now.date().isoformat()
     grace = datetime.timedelta(hours=3)
-    s = get_briefing_settings()
-    if s["enabled"]:
-        hh, mm = map(int, s["deliver_time"].split(":"))
-        deliver = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        start = deliver - datetime.timedelta(minutes=s["prep_minutes"])
-        if start <= now <= deliver + grace and kv_get("last_build") != today:
-            kv_set("last_build", today)
-            enqueue_briefing(auto=1)
-        if now >= deliver:
-            for r in sql("SELECT id FROM runs WHERE kind='briefing' AND status='ready' AND auto=1 AND emailed=0"):
+    for account in list_accounts():
+        aid = account["id"]
+        s = get_briefing_settings(aid)
+        if s["enabled"]:
+            hh, mm = map(int, s["deliver_time"].split(":"))
+            deliver = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            start = deliver - datetime.timedelta(minutes=s["prep_minutes"])
+            build_key = account_key(aid, "last_build")
+            if start <= now <= deliver + grace and kv_get(build_key) != today:
+                kv_set(build_key, today)
+                enqueue_briefing(auto=1, account_id=aid)
+            if now >= deliver:
+                for r in sql("SELECT id FROM runs WHERE kind='briefing' AND status='ready' AND auto=1 AND emailed=0 AND account_id=?", (aid,)):
+                    try:
+                        send_briefing(r["id"])
+                    except Exception as e:
+                        update_run(r["id"], auto=0, detail=f"Email failed: {e}")
+        for sc in get_schedules(aid):
+            if not sc.get("enabled", True):
+                continue
+            hh, mm = map(int, sc["time"].split(":"))
+            due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if now.weekday() in sc["days"] and due <= now <= due + grace and sc.get("last_run") != today:
+                with _cfg_lock:
+                    items = get_schedules(aid)
+                    for i in items:
+                        if i["id"] == sc["id"]:
+                            i["last_run"] = today
+                    account_kv_set(aid, "schedules", items)
                 try:
-                    send_briefing(r["id"])
+                    enqueue_task(sc["preset_id"], sc.get("note", ""), sc.get("urls", []), [], True,
+                                 title=sc["name"], account_id=aid)
                 except Exception as e:
-                    update_run(r["id"], auto=0, detail=f"Email failed: {e}")
-    for sc in get_schedules():
-        if not sc.get("enabled", True):
-            continue
-        hh, mm = map(int, sc["time"].split(":"))
-        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if now.weekday() in sc["days"] and due <= now <= due + grace and sc.get("last_run") != today:
-            with _cfg_lock:
-                items = get_schedules()
-                for i in items:
-                    if i["id"] == sc["id"]:
-                        i["last_run"] = today
-                kv_set("schedules", items)
-            try:
-                enqueue_task(sc["preset_id"], sc.get("note", ""), sc.get("urls", []), [], True, title=sc["name"])
-            except Exception as e:
-                log("schedule failed:", e)
+                    log("schedule failed:", e)
 
 
 def worker_loop():
@@ -1004,18 +1119,31 @@ def scheduler_loop():
 
 
 def init():
+    aid = ensure_default_account(env("HUB_PASSWORD"), env("HUB_ACCOUNT_NAME", "admin"))
+    sql("UPDATE runs SET account_id=? WHERE account_id IS NULL", (aid,))
+    legacy = {
+        "briefing": kv_get("briefing"),
+        "general": kv_get("general"),
+        "presets": kv_get("presets"),
+        "schedules": kv_get("schedules"),
+    }
+    for key, value in legacy.items():
+        if value is not None and account_kv_get(aid, key) is None:
+            account_kv_set(aid, key, value)
     sql("UPDATE runs SET status='error', detail='Interrupted by a restart' WHERE status IN ('queued','running')")
-    get_presets()
+    get_presets(aid)
     set_paused(bool(kv_get("paused", False)))
 
 
-def system_status():
+def system_status(account_id=None):
     with _lock:
         busy = state["busy"]
         worker_busy = state["worker_busy"]
         paused = state["paused"]
         queued = jobs.qsize()
-    return {"pc_up": ollama_up(), "email_ready": email_configured(), "recipients": get_recipients() if MAIL_TO or (kv_get("general") or {}).get("recipients") else [],
+    general = account_kv_get(account_id, "general", {}) if account_id is not None else (kv_get("general") or {})
+    recipients = get_recipients(account_id) if MAIL_TO or (general or {}).get("recipients") else []
+    return {"pc_up": ollama_up(), "email_ready": email_configured(), "recipients": recipients,
             "freshrss_ready": bool(FRESH_URL and FRESH_USER and FRESH_PASS),
             "text_model": TEXT_MODEL, "vision_model": VISION_MODEL, "pc_ip": PC_IP,
             "busy": busy, "worker_busy": worker_busy, "paused": paused, "queued": queued,

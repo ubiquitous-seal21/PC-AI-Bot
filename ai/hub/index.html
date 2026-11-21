@@ -56,12 +56,13 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
 <body>
 <div id="login" class="hide">
   <div class="panel"><h2>Home AI Hub</h2>
+    <label>Account</label><input id="accountName" value="admin" autocomplete="username">
     <label>Password</label><input id="pw" type="password" autocomplete="current-password">
     <p><button class="btn" id="loginBtn">Log in</button></p><div id="loginErr" class="bad"></div></div>
 </div>
 
 <div id="app" class="hide">
-<header><h1>Home AI Hub</h1><span id="pcState" class="pill">PC: ?</span><span id="activityState" class="pill">Idle</span><button class="btn alt" id="logout">Log out</button></header>
+<header><h1>Home AI Hub</h1><select id="accountSelect" title="Switch account" style="width:auto"></select><button class="btn alt" id="addAccount">New account</button><span id="pcState" class="pill">PC: ?</span><span id="activityState" class="pill">Idle</span><button class="btn alt" id="logout">Log out</button></header>
 <main>
 <nav id="tabs"></nav>
 <div class="workspace"><div id="work">
@@ -194,9 +195,17 @@ function showLogin(){$("#app").classList.add("hide");$("#login").classList.remov
 async function start(){
   try{S=await api("GET","/api/state");}catch(e){return}
   $("#login").classList.add("hide");$("#app").classList.remove("hide");
+  fillAccounts();
   const nav=$("#tabs");nav.textContent="";
   TABS.forEach(([id,name],i)=>nav.append(el("button",{textContent:name,id:"tab-"+id,on:{click:()=>openTab(id)}})));
   fillAll();openTab(location.hash.slice(1)||"briefing");
+}
+
+function fillAccounts(){
+  const select=$("#accountSelect");
+  select.textContent="";
+  (S.accounts||[]).forEach(a=>select.append(el("option",{value:a.id,textContent:a.name})));
+  if(S.account)select.value=String(S.account.id);
 }
 function openTab(id){
   if(!TABS.some(t=>t[0]===id))id="briefing";
@@ -255,7 +264,7 @@ $("#saveCustom").onclick=async()=>{
     await api("PUT","/api/general",{recipients:$("#recipients").value});
     const j=await api("PUT","/api/briefing/settings",{deliver_time:$("#deliver").value,prep_minutes:$("#prep").value,lookback_hours:$("#look").value,top_n:$("#topn").value,min_importance:$("#minimp").value,max_items:$("#maxitems").value,enabled:$("#enabled").checked,include_read:$("#inclRead").checked,focuses:[...$("#focuses").children].map(r=>r.get())});
     S.briefing=j.settings;S=await api("GET","/api/state");fillAll();toast("Saved");
-  }catch(e){toast(e.message)}
+  }catch(e){fillAccounts();toast(e.message)}
 };
 $("#testMail").onclick=async()=>{try{await api("PUT","/api/general",{recipients:$("#recipients").value});await api("POST","/api/email/test",{});toast("Test email sent")}catch(e){toast(e.message)}};
 
@@ -366,7 +375,11 @@ async function updateStatus(){
     const r=await api("GET","/api/update/status");
     const status=$("#updateStatus");
     if(status)status.textContent=r.message||"";
-  }catch(e){const status=$("#updateStatus");if(status)status.textContent=e.message}
+    if(r.running===false&&status&&/^(Update complete|Update failed|Update blocked)/.test(r.message)){
+      const button=$("#updateBtn");if(button)button.disabled=false;
+    }
+    return r;
+  }catch(e){const status=$("#updateStatus");if(status)status.textContent=e.message;throw e}
 }
 function updateFromGitHub(){
   if(!confirm("Pull the latest update and rebuild the Hub? Saved settings and Docker data will be preserved."))return;
@@ -374,7 +387,18 @@ function updateFromGitHub(){
   $("#updateStatus").textContent="Starting update...";
   api("POST","/api/update",{}).then(()=>{
     toast("Update started; the Hub will reconnect shortly");
-    setTimeout(updateStatus,3000);
+    let attempts=0;
+    const poll=setInterval(()=>{
+      attempts++;
+      updateStatus().then(()=>{
+        const status=$("#updateStatus");
+        if(status&&/^(Update complete|Update failed|Update blocked)/.test(status.textContent)){
+          clearInterval(poll);
+          $("#updateBtn").disabled=false;
+        }
+      }).catch(()=>{});
+      if(attempts>=40){clearInterval(poll);$("#updateBtn").disabled=false;$("#updateStatus").textContent="Update status timed out. Refresh and check Docker logs."}
+    },3000);
   }).catch(e=>{
     $("#updateBtn").disabled=false;
     $("#updateStatus").textContent=e.message;
@@ -385,9 +409,27 @@ $("#offBtn").onclick=async()=>{if(confirm("Power the PC off now?")){try{await ap
 $("#pauseBtn").onclick=async()=>{try{const pa=!(S&&S.status&&S.status.paused);const j=await api("PUT","/api/pc/pause",{paused:pa});S.status.paused=j.paused;$("#pauseBtn").textContent=j.paused?"Resume AI":"Pause AI";toast(j.paused?"AI paused":"AI resumed")}catch(e){toast(e.message)}};
 setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
 
-$("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};
+$("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{username:$("#accountName").value,password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};
 $("#pw").addEventListener("keydown",e=>{if(e.key==="Enter")$("#loginBtn").click()});
 $("#logout").onclick=async()=>{await api("POST","/api/logout",{});showLogin()};
+$("#accountSelect").onchange=async()=>{
+  const password=prompt("Password for "+$("#accountSelect").selectedOptions[0].textContent+":");
+  if(password===null){fillAccounts();return}
+  try{
+    await api("POST","/api/accounts/"+$("#accountSelect").value+"/switch", {password});
+    S=await api("GET","/api/state");fillAccounts();fillAll();toast("Switched account");
+  }catch(e){toast(e.message)}
+};
+$("#addAccount").onclick=async()=>{
+  const name=prompt("New account name:");
+  if(!name)return;
+  const password=prompt("Password (at least 8 characters):");
+  if(password===null)return;
+  try{
+    await api("POST","/api/accounts",{name,password});
+    S=await api("GET","/api/state");fillAccounts();toast("Account created");
+  }catch(e){toast(e.message)}
+};
 start();
 </script>
 </body>

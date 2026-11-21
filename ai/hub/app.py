@@ -1,7 +1,6 @@
 """Home AI Hub: web server. Serves the GUI and a small JSON API."""
 import datetime
 import hashlib
-import hmac
 import os
 import subprocess
 import threading
@@ -14,6 +13,7 @@ import engine as E
 PASSWORD = os.environ.get("HUB_PASSWORD", "")
 if len(PASSWORD) < 8:
     raise SystemExit("Set HUB_PASSWORD in .env (at least 8 characters).")
+ACCOUNT_NAME = os.environ.get("HUB_ACCOUNT_NAME", "admin").strip() or "admin"
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "40"))
 
 app = Flask(__name__, static_folder=None)
@@ -57,7 +57,7 @@ def guard():
     p = request.path
     if p in ("/", "/api/login") or p == "/favicon.ico":
         return None
-    if not session.get("auth"):
+    if not session.get("auth") or not session.get("account_id"):
         return err("Please log in.", 401)
     if request.method != "GET" and request.headers.get("X-Hub") != "1":
         return err("Bad request.", 403)
@@ -81,13 +81,19 @@ def login():
         n, until = _fails.get(ip, (0, 0))
         if until > time.time():
             return err("Too many attempts. Wait a minute.", 429)
-    pw = (request.get_json(silent=True) or {}).get("password", "")
-    if hmac.compare_digest(str(pw).encode(), PASSWORD.encode()):
+    raw = request.get_json(silent=True) or {}
+    pw = str(raw.get("password", ""))
+    name = str(raw.get("username") or raw.get("name") or ACCOUNT_NAME).strip()
+    E.ensure_default_account(PASSWORD, ACCOUNT_NAME)
+    account = E.verify_account(name, pw)
+    if account:
         with _fail_lock:
             _fails.pop(ip, None)
         session.permanent = True
         session["auth"] = True
-        return ok()
+        session["account_id"] = account["id"]
+        session["account_name"] = account["name"]
+        return ok(account=account)
     with _fail_lock:
         n += 1
         _fails[ip] = (n, time.time() + 60 if n >= 5 else 0)
@@ -101,47 +107,87 @@ def logout():
     return ok()
 
 
+def current_account_id():
+    return session.get("account_id")
+
+
+@app.get("/api/accounts")
+def accounts():
+    return jsonify({"ok": True, "accounts": E.list_accounts(),
+                    "current": current_account_id()})
+
+
+@app.post("/api/accounts")
+def create_account():
+    raw = request.get_json(silent=True) or {}
+    try:
+        account = E.create_account(raw.get("name", ""), raw.get("password", ""))
+        return ok(account=account)
+    except ValueError as e:
+        return err(str(e))
+
+
+@app.post("/api/accounts/<int:aid>/switch")
+def switch_account(aid):
+    account = E.get_account(aid)
+    if not account:
+        return err("Account not found.", 404)
+    raw = request.get_json(silent=True) or {}
+    if not E.verify_account(account["name"], str(raw.get("password", ""))):
+        return err("Wrong account password.", 401)
+    session["account_id"] = account["id"]
+    session["account_name"] = account["name"]
+    return ok(account=account)
+
+
 @app.get("/api/state")
 def state():
-    return jsonify({"briefing": E.get_briefing_settings(),
-                    "general": {"recipients": ", ".join(E.get_recipients()) if (E.MAIL_TO or (E.kv_get("general") or {}).get("recipients")) else ""},
-                    "presets": E.get_presets(), "schedules": E.get_schedules(),
-                    "status": E.system_status(),
+    aid = current_account_id()
+    general = E.account_kv_get(aid, "general", {}) if aid is not None else {}
+    return jsonify({"account": E.get_account(aid),
+                    "accounts": E.list_accounts(),
+                    "briefing": E.get_briefing_settings(aid),
+                    "general": {"recipients": ", ".join(E.get_recipients(aid)) if (E.MAIL_TO or general.get("recipients")) else ""},
+                    "presets": E.get_presets(aid), "schedules": E.get_schedules(aid),
+                    "status": E.system_status(aid),
                     "uploads_mb": MAX_UPLOAD_MB})
 
 
 @app.put("/api/briefing/settings")
 def put_briefing():
-    return ok(settings=E.save_briefing_settings(request.get_json(silent=True) or {}))
+    return ok(settings=E.save_briefing_settings(request.get_json(silent=True) or {}, current_account_id()))
 
 
 @app.put("/api/general")
 def put_general():
     try:
-        return ok(general=E.save_general(request.get_json(silent=True) or {}))
+        return ok(general=E.save_general(request.get_json(silent=True) or {}, current_account_id()))
     except ValueError as e:
         return err(str(e))
 
 
 @app.post("/api/briefing/build")
 def build():
-    return ok(id=E.enqueue_briefing())
+    return ok(id=E.enqueue_briefing(account_id=current_account_id()))
 
 
 @app.get("/api/runs")
 def runs():
-    return jsonify(E.list_runs(request.args.get("kind"), 60))
+    return jsonify(E.list_runs(request.args.get("kind"), 60, current_account_id()))
 
 
 @app.get("/api/runs/<int:rid>")
 def one_run(rid):
-    r = E.get_run(rid)
+    r = E.get_run(rid, current_account_id())
     return jsonify(r) if r else err("Not found", 404)
 
 
 @app.post("/api/runs/<int:rid>/send")
 def send_run(rid):
     try:
+        r = E.get_run(rid, current_account_id())
+        if not r:
+            return err("Not found", 404)
         E.send_briefing(rid)
         return ok()
     except Exception as e:
@@ -157,7 +203,8 @@ def task():
     if not (urls or files or note.strip()):
         return err("Add a link, a file or some text first.")
     try:
-        rid = E.enqueue_task(f.get("preset_id", "ask"), note, urls, files, f.get("email") == "1")
+        rid = E.enqueue_task(f.get("preset_id", "ask"), note, urls, files, f.get("email") == "1",
+                             account_id=current_account_id())
         return ok(id=rid)
     except ValueError as e:
         return err(str(e))
@@ -166,35 +213,36 @@ def task():
 @app.post("/api/presets")
 def preset_save():
     try:
-        return ok(preset=E.save_preset(request.get_json(silent=True) or {}))
+        return ok(preset=E.save_preset(request.get_json(silent=True) or {}, current_account_id()))
     except ValueError as e:
         return err(str(e))
 
 
 @app.delete("/api/presets/<pid>")
 def preset_delete(pid):
-    E.delete_preset(pid)
+    E.delete_preset(pid, current_account_id())
     return ok()
 
 
 @app.post("/api/schedules")
 def schedule_save():
     try:
-        return ok(schedule=E.save_schedule(request.get_json(silent=True) or {}))
+        return ok(schedule=E.save_schedule(request.get_json(silent=True) or {}, current_account_id()))
     except (ValueError, KeyError) as e:
         return err(str(e))
 
 
 @app.delete("/api/schedules/<sid>")
 def schedule_delete(sid):
-    E.delete_schedule(sid)
+    E.delete_schedule(sid, current_account_id())
     return ok()
 
 
 @app.post("/api/email/test")
 def email_test():
     try:
-        E.send_email("Home AI Hub: test email", "If you can read this, email delivery works.")
+        E.send_email("Home AI Hub: test email", "If you can read this, email delivery works.",
+                     account_id=current_account_id())
         return ok()
     except Exception as e:
         return err(str(e))
@@ -254,14 +302,20 @@ def update_status():
             message = f.read().strip()
     except FileNotFoundError:
         message = "No update has been started."
-    return ok(message=message)
+    process_log = ""
+    try:
+        with open(UPDATE_STATUS + ".process", "r", encoding="utf-8") as f:
+            process_log = f.read()[-4000:]
+    except FileNotFoundError:
+        pass
+    return ok(message=message, process_log=process_log, running=_update_running)
 
 
 @app.post("/api/chat")
 def chat():
     raw = request.get_json(silent=True) or {}
     try:
-        rid = E.enqueue_chat(raw.get("message", ""))
+        rid = E.enqueue_chat(raw.get("message", ""), current_account_id())
         return ok(id=rid)
     except (RuntimeError, ValueError) as e:
         return err(str(e), 409 if isinstance(e, RuntimeError) else 400)

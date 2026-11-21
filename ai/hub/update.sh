@@ -24,6 +24,12 @@ mkdir -p "$BACKUP/data" "$BACKUP/ssh"
 
 printf 'Update started\n' > "$STATUS"
 
+if ! docker info >/dev/null 2>&1; then
+  printf 'Update failed: Docker daemon is unavailable from the Hub container\n' > "$STATUS"
+  restore_settings
+  exit 1
+fi
+
 OLD_HEAD=$(git -C "$REPO" rev-parse HEAD)
 BRANCH=$(git -C "$REPO" branch --show-current)
 COMPOSE_STASHED=0
