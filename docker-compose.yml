@@ -9,3 +9,8 @@ services:
       - ./ssh:/ssh:ro
       - ./:/repo:rw
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - caddy_net
+networks:
+  caddy_net:
+    external: true
