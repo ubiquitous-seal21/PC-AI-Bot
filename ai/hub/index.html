@@ -44,6 +44,9 @@ pre.out{white-space:pre-wrap;font:inherit;background:var(--bg);border:1px solid 
 #updateProgressBar .fill{height:100%;width:0;background:var(--acc);transition:width .35s ease}
 #updateProgressBar.failed .fill{background:var(--bad)}
 #updateProgressBar.complete .fill{background:var(--ok)}
+#updateProgressBar.running .fill{position:relative}
+#updateProgressBar.running .fill:after{content:"";position:absolute;inset:0;width:35%;background:rgba(255,255,255,.55);animation:updateSweep 1.2s linear infinite}
+@keyframes updateSweep{from{left:-35%}to{left:100%}}
 table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:12px}
 .side{display:flex;flex-direction:column;gap:10px;padding-top:12px}
@@ -197,6 +200,7 @@ function syncUpdateProgress(r){
   }
   bar.classList.toggle("failed",/^Update failed|^Update blocked/.test(message));
   bar.classList.toggle("complete",/^Update complete/.test(message));
+  bar.classList.toggle("running",Boolean(r.running&&!terminal));
   text.textContent=terminal?message:(message||"Update in progress");
   fill.style.width=Math.max(1,Math.min(100,r.progress||0))+"%";
   if(terminal){
@@ -395,7 +399,8 @@ async function loadSys(){
     el("b",{textContent:"Update"}),
     el("p",{class:"mute",textContent:"Pull GitHub updates and rebuild the Hub automatically. Saved settings, .env, Docker data, and SSH files are preserved."}),
     el("p",{},el("button",{id:"updateBtn",class:"btn",textContent:"Update from GitHub",on:{click:updateFromGitHub}})),
-    el("div",{id:"updateStatus",class:"mute"})));
+    el("div",{id:"updateStatus",class:"mute"}),
+    el("pre",{id:"updateProcessLog",class:"out hide",style:"max-height:180px;font-size:12px"})));
   updateStatus();
 }
 async function updateStatus(){
@@ -403,6 +408,11 @@ async function updateStatus(){
     const r=await api("GET","/api/update/status");
     const status=$("#updateStatus");
     if(status)status.textContent=r.message||"";
+    const processLog=$("#updateProcessLog");
+    if(processLog){
+      processLog.textContent=r.process_log||"";
+      processLog.classList.toggle("hide",!r.process_log);
+    }
     syncUpdateProgress(r);
     if(r.running===false&&status&&/^(Update complete|Update failed|Update blocked)/.test(r.message)){
       const button=$("#updateBtn");if(button)button.disabled=false;

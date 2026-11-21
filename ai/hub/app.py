@@ -5,6 +5,7 @@ import os
 import subprocess
 import threading
 import time
+import re
 
 from flask import Flask, jsonify, request, send_from_directory, session
 
@@ -330,13 +331,10 @@ def update_status():
         pass
     progress = 5
     if message.startswith("Update progress:"):
-        phase = message.split(":", 2)
-        if len(phase) >= 2:
-            try:
-                progress = max(5, min(95, int(phase[1])))
-            except ValueError:
-                pass
-        message = phase[2].strip() if len(phase) == 3 else message
+        phase = re.match(r"^Update progress:(\d+):(.*)$", message, re.DOTALL)
+        if phase:
+            progress = max(5, min(95, int(phase.group(1))))
+            message = phase.group(2).strip()
     elif message.startswith("Update complete"):
         progress = 100
     elif message.startswith(("Update failed", "Update blocked")):
