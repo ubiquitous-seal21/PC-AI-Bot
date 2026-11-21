@@ -41,6 +41,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   REPO_HOME=$(dirname "$REPO_SOURCE")
   REPO_UID=$(stat -c '%u' "$REPO_SOURCE")
   REPO_GID=$(stat -c '%g' "$REPO_SOURCE")
+  HELPER_SETUP='git config --global --replace-all safe.directory "*" >/dev/null 2>&1 || true; git config --global --add safe.directory "*" >/dev/null 2>&1 || true'
   if [ -f "$REPO_HOME/.gitconfig" ] && [ -d "$REPO_HOME/.config/gh" ]; then
     docker run -d --name "$HELPER" --network host --rm \
       -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
@@ -50,7 +51,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
       -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
       -v "$REPO_HOME/.config/gh:/tmp/updater/.config/gh:ro" \
       -v /var/run/docker.sock:/var/run/docker.sock \
-      "$IMAGE" sh -c 'mkdir -p /tmp/updater/.config; gh auth setup-git >/dev/null 2>&1 || true; exec /repo/ai/hub/update.sh' >/dev/null &&
+      "$IMAGE" sh -c "$HELPER_SETUP; mkdir -p /tmp/updater/.config; gh auth setup-git >/dev/null 2>&1 || true; exec /repo/ai/hub/update.sh" >/dev/null &&
       exit 0
   elif [ -f "$REPO_HOME/.gitconfig" ] && [ -f "$REPO_HOME/.git-credentials" ]; then
     docker run -d --name "$HELPER" --network host --rm \
@@ -61,7 +62,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
       -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
       -v "$REPO_HOME/.git-credentials:/tmp/updater/.git-credentials:ro" \
       -v /var/run/docker.sock:/var/run/docker.sock \
-      "$IMAGE" sh -c 'git config --global credential.helper "store --file=/tmp/updater/.git-credentials"; exec /repo/ai/hub/update.sh' >/dev/null &&
+      "$IMAGE" sh -c "$HELPER_SETUP; git config --global credential.helper \"store --file=/tmp/updater/.git-credentials\" >/dev/null 2>&1 || true; exec /repo/ai/hub/update.sh" >/dev/null &&
       exit 0
   elif [ -f "$REPO_HOME/.gitconfig" ]; then
     docker run -d --name "$HELPER" --network host --rm \
@@ -71,7 +72,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
       -v "$REPO_SOURCE:/repo:rw" \
       -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
       -v /var/run/docker.sock:/var/run/docker.sock \
-      "$IMAGE" sh -c 'exec /repo/ai/hub/update.sh' >/dev/null &&
+      "$IMAGE" sh -c "$HELPER_SETUP; exec /repo/ai/hub/update.sh" >/dev/null &&
       exit 0
   else
     docker run -d --name "$HELPER" --network host --rm \
@@ -80,7 +81,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
       -v /var/run/docker.sock:/var/run/docker.sock \
-      "$IMAGE" sh -c 'exec /repo/ai/hub/update.sh' >/dev/null &&
+      "$IMAGE" sh -c "$HELPER_SETUP; exec /repo/ai/hub/update.sh" >/dev/null &&
       exit 0
   fi
   printf 'Update failed: could not start the update helper\n' > "$STATUS"
