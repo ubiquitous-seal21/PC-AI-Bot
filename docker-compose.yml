@@ -1,0 +1,10 @@
+services:
+  ai-hub:
+    build: ./hub
+    container_name: ai-hub
+    restart: unless-stopped
+    network_mode: host      # lets the container send Wake-on-LAN broadcasts
+    env_file: .env
+    volumes:
+      - ./data:/data
+      - ./ssh:/ssh:ro

@@ -1,0 +1,210 @@
+"""Home AI hub: web server. Serves the GUI and a small JSON API."""
+import datetime
+import hashlib
+import hmac
+import os
+import threading
+import time
+
+from flask import Flask, jsonify, request, send_from_directory, session
+
+import engine as E
+
+PASSWORD = os.environ.get("HUB_PASSWORD", "")
+if len(PASSWORD) < 8:
+    raise SystemExit("Set HUB_PASSWORD in .env (at least 8 characters).")
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "40"))
+
+app = Flask(__name__, static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
+app.secret_key = hashlib.sha256(("hub-session|" + PASSWORD).encode()).digest()
+
+_fails = {}
+_fail_lock = threading.Lock()
+
+
+def ok(**kw):
+    return jsonify({"ok": True, **kw})
+
+
+def err(msg, code=400):
+    return jsonify({"ok": False, "error": msg}), code
+
+
+@app.before_request
+def guard():
+    p = request.path
+    if p in ("/", "/api/login") or p == "/favicon.ico":
+        return None
+    if not session.get("auth"):
+        return err("Please log in.", 401)
+    if request.method != "GET" and request.headers.get("X-Hub") != "1":
+        return err("Bad request.", 403)
+    return None
+
+
+@app.get("/")
+def index():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "index.html")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return ("", 204)
+
+
+@app.post("/api/login")
+def login():
+    ip = request.remote_addr or "?"
+    with _fail_lock:
+        n, until = _fails.get(ip, (0, 0))
+        if until > time.time():
+            return err("Too many attempts. Wait a minute.", 429)
+    pw = (request.get_json(silent=True) or {}).get("password", "")
+    if hmac.compare_digest(str(pw).encode(), PASSWORD.encode()):
+        with _fail_lock:
+            _fails.pop(ip, None)
+        session.permanent = True
+        session["auth"] = True
+        return ok()
+    with _fail_lock:
+        n += 1
+        _fails[ip] = (n, time.time() + 60 if n >= 5 else 0)
+    time.sleep(1)
+    return err("Wrong password.", 401)
+
+
+@app.post("/api/logout")
+def logout():
+    session.clear()
+    return ok()
+
+
+@app.get("/api/state")
+def state():
+    return jsonify({"briefing": E.get_briefing_settings(),
+                    "general": {"recipients": ", ".join(E.get_recipients()) if (E.MAIL_TO or (E.kv_get("general") or {}).get("recipients")) else ""},
+                    "presets": E.get_presets(), "schedules": E.get_schedules(),
+                    "status": E.system_status(),
+                    "uploads_mb": MAX_UPLOAD_MB})
+
+
+@app.put("/api/briefing/settings")
+def put_briefing():
+    return ok(settings=E.save_briefing_settings(request.get_json(silent=True) or {}))
+
+
+@app.put("/api/general")
+def put_general():
+    try:
+        return ok(general=E.save_general(request.get_json(silent=True) or {}))
+    except ValueError as e:
+        return err(str(e))
+
+
+@app.post("/api/briefing/build")
+def build():
+    return ok(id=E.enqueue_briefing())
+
+
+@app.get("/api/runs")
+def runs():
+    return jsonify(E.list_runs(request.args.get("kind"), 60))
+
+
+@app.get("/api/runs/<int:rid>")
+def one_run(rid):
+    r = E.get_run(rid)
+    return jsonify(r) if r else err("Not found", 404)
+
+
+@app.post("/api/runs/<int:rid>/send")
+def send_run(rid):
+    try:
+        E.send_briefing(rid)
+        return ok()
+    except Exception as e:
+        return err(str(e))
+
+
+@app.post("/api/task")
+def task():
+    f = request.form
+    urls = [u for u in (f.get("urls", "")).splitlines() if u.strip()]
+    files = [(os.path.basename(x.filename or "file"), x.read()) for x in request.files.getlist("files")]
+    note = f.get("note", "")
+    if not (urls or files or note.strip()):
+        return err("Add a link, a file or some text first.")
+    try:
+        rid = E.enqueue_task(f.get("preset_id", "ask"), note, urls, files, f.get("email") == "1")
+        return ok(id=rid)
+    except ValueError as e:
+        return err(str(e))
+
+
+@app.post("/api/presets")
+def preset_save():
+    try:
+        return ok(preset=E.save_preset(request.get_json(silent=True) or {}))
+    except ValueError as e:
+        return err(str(e))
+
+
+@app.delete("/api/presets/<pid>")
+def preset_delete(pid):
+    E.delete_preset(pid)
+    return ok()
+
+
+@app.post("/api/schedules")
+def schedule_save():
+    try:
+        return ok(schedule=E.save_schedule(request.get_json(silent=True) or {}))
+    except (ValueError, KeyError) as e:
+        return err(str(e))
+
+
+@app.delete("/api/schedules/<sid>")
+def schedule_delete(sid):
+    E.delete_schedule(sid)
+    return ok()
+
+
+@app.post("/api/email/test")
+def email_test():
+    try:
+        E.send_email("Home AI hub: test email", "If you can read this, email delivery works.")
+        return ok()
+    except Exception as e:
+        return err(str(e))
+
+
+@app.post("/api/pc/wake")
+def pc_wake():
+    try:
+        E.send_magic()
+        return ok()
+    except Exception as e:
+        return err(str(e))
+
+
+@app.post("/api/pc/off")
+def pc_off():
+    E.power_off_pc()
+    return ok()
+
+
+def main():
+    from waitress import serve
+    E.init()
+    for fn in (E.worker_loop, E.scheduler_loop, E.idle_loop):
+        threading.Thread(target=fn, daemon=True).start()
+    E.log("hub started on port", os.environ.get("PORT", "8088"))
+    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8088")), threads=8)
+
+
+if __name__ == "__main__":
+    main()

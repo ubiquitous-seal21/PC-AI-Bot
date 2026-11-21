@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home AI hub</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1b1f24;--mute:#667085;--line:#e3e6ea;--acc:#0b57d0;--ok:#127a3d;--bad:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#14171b;--card:#1c2026;--ink:#e8eaed;--mute:#9aa3ad;--line:#2d333b;--acc:#7ab0ff;--ok:#5fd08a;--bad:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:17px;margin:0;flex:1}
+nav{display:flex;gap:4px;flex-wrap:wrap;padding:8px 16px 0}
+nav button{background:none;border:0;padding:8px 12px;border-radius:8px 8px 0 0;color:var(--mute);font:inherit;cursor:pointer}
+nav button.on{background:var(--card);color:var(--ink);font-weight:600;border:1px solid var(--line);border-bottom-color:var(--card)}
+main{padding:0 16px 40px;max-width:980px;margin:0 auto}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:0 12px 12px 12px;padding:16px;margin-top:-1px}
+h2{font-size:16px;margin:0 0 10px}
+label{display:block;font-size:13px;color:var(--mute);margin:10px 0 4px}
+input,textarea,select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+textarea{min-height:90px;resize:vertical}
+input[type=checkbox]{width:auto}
+button.btn{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 14px;font:inherit;cursor:pointer}
+@media (prefers-color-scheme:dark){button.btn{color:#0b1220}}
+button.alt{background:none;color:var(--acc);border:1px solid var(--line)}
+button.del{background:none;color:var(--bad);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+.row>*{flex:1;min-width:130px}
+.row>.fixed{flex:0 0 auto;min-width:0}
+.card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0}
+.mute{color:var(--mute);font-size:13px}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+iframe{width:100%;height:70vh;border:1px solid var(--line);border-radius:10px;background:#fff}
+pre.out{white-space:pre-wrap;font:inherit;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px}
+.days label{display:inline-flex;gap:4px;margin:0 8px 0 0;align-items:center;color:var(--ink)}
+#login{max-width:340px;margin:12vh auto;padding:0 16px}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;display:none;max-width:90vw}
+.hide{display:none}
+table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+</style>
+</head>
+<body>
+<div id="login" class="hide">
+  <div class="panel"><h2>Home AI hub</h2>
+    <label>Password</label><input id="pw" type="password" autocomplete="current-password">
+    <p><button class="btn" id="loginBtn">Log in</button></p><div id="loginErr" class="bad"></div></div>
+</div>
+
+<div id="app" class="hide">
+<header><h1>Home AI hub</h1><span id="pcState" class="pill">PC: ?</span><button class="btn alt" id="logout">Log out</button></header>
+<main>
+<nav id="tabs"></nav>
+
+<section id="t-briefing" class="panel">
+  <h2>Briefing</h2>
+  <p class="mute">The bot reads your FreshRSS articles, merges duplicates, ranks stories by importance, and builds this page. It is emailed automatically at your delivery time (set on Customize).</p>
+  <div class="row"><div class="fixed"><button class="btn" id="buildBtn">Build a briefing now</button></div>
+  <div class="fixed"><button class="btn alt" id="sendBtn" disabled>Email this briefing</button></div></div>
+  <p id="bStatus" class="mute"></p>
+  <iframe id="bFrame" sandbox="" class="hide"></iframe>
+</section>
+
+<section id="t-custom" class="panel hide">
+  <h2>Customize the briefing</h2>
+  <div class="row">
+    <div><label>Email to</label><input id="recipients" placeholder="you@example.com (several allowed, comma separated)"></div>
+    <div class="fixed"><button class="btn alt" id="testMail">Send test email</button></div>
+  </div>
+  <div class="row">
+    <div><label>Deliver at</label><input id="deliver" type="time"></div>
+    <div><label>Start preparing (minutes before)</label><input id="prep" type="number" min="10" max="240"></div>
+    <div><label>Look back (hours)</label><input id="look" type="number" min="1" max="72"></div>
+  </div>
+  <div class="row">
+    <div><label>Top stories shown</label><input id="topn" type="number" min="1" max="30"></div>
+    <div><label>Minimum importance (0-10)</label><input id="minimp" type="number" min="0" max="10"></div>
+    <div><label>Max articles read</label><input id="maxitems" type="number" min="20" max="500"></div>
+  </div>
+  <label><input type="checkbox" id="enabled"> Send the briefing every morning</label>
+  <label><input type="checkbox" id="inclRead"> Include articles I already marked as read</label>
+  <h2 style="margin-top:18px">Focus areas</h2>
+  <p class="mute">Beyond "Top stories", each focus gets its own section. Describe it in plain words; the model matches stories to it.</p>
+  <div id="focuses"></div>
+  <p><button class="btn alt" id="addFocus">+ Add a focus</button></p>
+  <p><button class="btn" id="saveCustom">Save</button></p>
+</section>
+
+<section id="t-ask" class="panel hide">
+  <h2>Ask or process anything</h2>
+  <p class="mute">Give it links (articles or videos), files (PDF, text, images), a photo, or just text. Pick what to do with it.</p>
+  <label>What to do</label><select id="preset"></select>
+  <label>Your request or notes</label><textarea id="note" placeholder="e.g. 'vegetarian, 30 minutes' or a question"></textarea>
+  <label>Links (one per line)</label><textarea id="urls" style="min-height:60px"></textarea>
+  <label>Files or photos</label><input type="file" id="files" multiple>
+  <p><label style="display:inline-flex;gap:6px;align-items:center;color:var(--ink)"><input type="checkbox" id="emailIt"> Email me the result</label></p>
+  <p><button class="btn" id="askBtn">Run</button></p>
+  <div id="askStatus" class="mute"></div>
+  <pre id="askOut" class="out hide"></pre>
+  <p><button class="btn alt hide" id="copyOut">Copy</button></p>
+</section>
+
+<section id="t-sched" class="panel hide">
+  <h2>Scheduled tasks</h2>
+  <p class="mute">Run any preset on a schedule and get the result by email, for example a weekly meal plan.</p>
+  <div id="schedList"></div>
+  <div class="card"><h2>New scheduled task</h2>
+    <div class="row"><div><label>Name</label><input id="sName" placeholder="Weekly meal plan"></div>
+    <div><label>Preset</label><select id="sPreset"></select></div>
+    <div><label>Time</label><input id="sTime" type="time" value="08:00"></div></div>
+    <label>Days</label><div class="days" id="sDays"></div>
+    <label>Notes or request</label><textarea id="sNote" style="min-height:60px"></textarea>
+    <label>Links (one per line, optional)</label><textarea id="sUrls" style="min-height:50px"></textarea>
+    <p><button class="btn" id="sAdd">Add</button></p></div>
+</section>
+
+<section id="t-presets" class="panel hide">
+  <h2>Presets</h2>
+  <p class="mute">A preset is a saved instruction. Make your own for anything: "explain like I'm new to this", "extract action items", "translate to Spanish".</p>
+  <div id="presetList"></div>
+  <div class="card"><h2 id="pTitle">New preset</h2>
+    <label>Name</label><input id="pName">
+    <label>Instructions for the AI</label><textarea id="pInstr"></textarea>
+    <label><input type="checkbox" id="pVision"> Use the vision model (for photos and videos)</label>
+    <p><button class="btn" id="pSave">Save preset</button> <button class="btn alt" id="pReset">Clear</button></p></div>
+</section>
+
+<section id="t-hist" class="panel hide">
+  <h2>History</h2>
+  <table><tbody id="histBody"></tbody></table>
+  <div id="histView"></div>
+</section>
+
+<section id="t-sys" class="panel hide">
+  <h2>System</h2>
+  <div id="sysInfo"></div>
+  <p><button class="btn alt" id="wakeBtn">Wake the PC</button> <button class="btn alt" id="offBtn">Power off the PC</button></p>
+  <p class="mute">The hub only powers off a PC it woke itself, after it has been idle. These buttons override that.</p>
+</section>
+</main>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const TABS = [["briefing","Briefing"],["custom","Customize"],["ask","Ask"],["sched","Scheduled"],["presets","Presets"],["hist","History"],["sys","System"]];
+const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+let S = null, currentBriefing = null, askPoll = null, bPoll = null;
+
+function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
+async function api(method, path, body, form){
+  const opt = {method, headers:{"X-Hub":"1"}};
+  if(form){opt.body=form}
+  else if(body!==undefined){opt.headers["Content-Type"]="application/json";opt.body=JSON.stringify(body)}
+  const r = await fetch(path,opt);
+  if(r.status===401 && path!=="/api/login"){showLogin();throw new Error("login")}
+  const j = await r.json().catch(()=>({ok:false,error:"Bad response"}));
+  if(j.ok===false) throw new Error(j.error||"Failed");
+  return j;
+}
+function el(tag, attrs={}, ...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs)){if(k==="on")for(const[ev,fn]of Object.entries(v))e.addEventListener(ev,fn);else if(k==="class")e.className=v;else e[k]=v}for(const k of kids)e.append(k);return e}
+
+function showLogin(){$("#app").classList.add("hide");$("#login").classList.remove("hide")}
+async function start(){
+  try{S=await api("GET","/api/state");}catch(e){return}
+  $("#login").classList.add("hide");$("#app").classList.remove("hide");
+  const nav=$("#tabs");nav.textContent="";
+  TABS.forEach(([id,name],i)=>nav.append(el("button",{textContent:name,id:"tab-"+id,on:{click:()=>openTab(id)}})));
+  fillAll();openTab(location.hash.slice(1)||"briefing");
+}
+function openTab(id){
+  if(!TABS.some(t=>t[0]===id))id="briefing";
+  location.hash=id;
+  TABS.forEach(([t])=>{$("#t-"+t).classList.toggle("hide",t!==id);$("#tab-"+t).classList.toggle("on",t===id)});
+  if(id==="hist")loadHist();if(id==="sys")loadSys();if(id==="briefing")loadLatestBriefing();
+}
+function fillAll(){fillCustom();fillPresets();fillSched()}
+
+// ----- briefing tab -----
+async function loadLatestBriefing(){
+  const rs=await api("GET","/api/runs?kind=briefing");
+  const r=rs.find(x=>["ready","sent","running","queued"].includes(x.status))||null;
+  if(r)showBriefing(r.id);
+}
+async function showBriefing(id){
+  clearTimeout(bPoll);
+  const r=await api("GET","/api/runs/"+id);currentBriefing=r;
+  const f=$("#bFrame");
+  $("#sendBtn").disabled=!["ready","sent"].includes(r.status);
+  if(["ready","sent"].includes(r.status)){f.classList.remove("hide");f.srcdoc=r.output;$("#bStatus").textContent=r.title+" · "+(r.detail||"")+(r.emailed?" · emailed":"")}
+  else if(r.status==="error"){f.classList.add("hide");$("#bStatus").textContent="Failed: "+r.detail}
+  else{$("#bStatus").textContent=r.title+" · "+(r.detail||"Working")+"...";bPoll=setTimeout(()=>showBriefing(id),3000)}
+}
+$("#buildBtn").onclick=async()=>{try{const j=await api("POST","/api/briefing/build",{});showBriefing(j.id)}catch(e){toast(e.message)}};
+$("#sendBtn").onclick=async()=>{if(!currentBriefing)return;try{await api("POST","/api/runs/"+currentBriefing.id+"/send",{});toast("Sent");showBriefing(currentBriefing.id)}catch(e){toast(e.message)}};
+
+// ----- customize tab -----
+function focusRow(f){
+  const row=el("div",{class:"card"});
+  const n=el("input",{value:f.name,placeholder:"Name, e.g. Technology"}),d=el("input",{value:f.description,placeholder:"What belongs here, in plain words"}),c=el("input",{type:"number",min:1,max:20,value:f.count});
+  row.append(el("div",{class:"row"},el("div",{},el("label",{textContent:"Name"}),n),el("div",{},el("label",{textContent:"What it covers"}),d),el("div",{class:"fixed",style:"width:90px"},el("label",{textContent:"Stories"}),c),el("div",{class:"fixed"},el("button",{class:"btn del",textContent:"Remove",on:{click:()=>row.remove()}}))));
+  row.get=()=>({name:n.value,description:d.value,count:+c.value||4});return row;
+}
+function fillCustom(){
+  const b=S.briefing;
+  $("#recipients").value=S.general.recipients;$("#deliver").value=b.deliver_time;$("#prep").value=b.prep_minutes;$("#look").value=b.lookback_hours;
+  $("#topn").value=b.top_n;$("#minimp").value=b.min_importance;$("#maxitems").value=b.max_items;$("#enabled").checked=b.enabled;$("#inclRead").checked=b.include_read;
+  const box=$("#focuses");box.textContent="";b.focuses.forEach(f=>box.append(focusRow(f)));
+}
+$("#addFocus").onclick=()=>$("#focuses").append(focusRow({name:"",description:"",count:4}));
+$("#saveCustom").onclick=async()=>{
+  try{
+    await api("PUT","/api/general",{recipients:$("#recipients").value});
+    const j=await api("PUT","/api/briefing/settings",{deliver_time:$("#deliver").value,prep_minutes:$("#prep").value,lookback_hours:$("#look").value,top_n:$("#topn").value,min_importance:$("#minimp").value,max_items:$("#maxitems").value,enabled:$("#enabled").checked,include_read:$("#inclRead").checked,focuses:[...$("#focuses").children].map(r=>r.get())});
+    S.briefing=j.settings;S=await api("GET","/api/state");fillAll();toast("Saved");
+  }catch(e){toast(e.message)}
+};
+$("#testMail").onclick=async()=>{try{await api("PUT","/api/general",{recipients:$("#recipients").value});await api("POST","/api/email/test",{});toast("Test email sent")}catch(e){toast(e.message)}};
+
+// ----- ask tab -----
+function fillPresets(){
+  for(const sel of [$("#preset"),$("#sPreset")]){const keep=sel.value;sel.textContent="";S.presets.forEach(p=>sel.append(el("option",{value:p.id,textContent:p.name})));if(keep)sel.value=keep}
+  const list=$("#presetList");list.textContent="";
+  S.presets.forEach(p=>list.append(el("div",{class:"card"},el("b",{textContent:p.name}),el("div",{class:"mute",textContent:p.instruction.slice(0,160)+(p.instruction.length>160?"...":"")}),el("p",{},el("button",{class:"btn alt",textContent:"Edit",on:{click:()=>editPreset(p)}})," ",el("button",{class:"btn del",textContent:"Delete",on:{click:async()=>{if(confirm("Delete this preset?")){await api("DELETE","/api/presets/"+p.id);S=await api("GET","/api/state");fillAll()}}}})))));
+}
+let editingPreset=null;
+function editPreset(p){editingPreset=p?p.id:null;$("#pTitle").textContent=p?"Edit preset":"New preset";$("#pName").value=p?p.name:"";$("#pInstr").value=p?p.instruction:"";$("#pVision").checked=p?p.vision:false;$("#pName").focus()}
+$("#pReset").onclick=()=>editPreset(null);
+$("#pSave").onclick=async()=>{try{await api("POST","/api/presets",{id:editingPreset,name:$("#pName").value,instruction:$("#pInstr").value,vision:$("#pVision").checked});S=await api("GET","/api/state");editPreset(null);fillAll();toast("Preset saved")}catch(e){toast(e.message)}};
+$("#askBtn").onclick=async()=>{
+  const fd=new FormData();fd.append("preset_id",$("#preset").value);fd.append("note",$("#note").value);fd.append("urls",$("#urls").value);fd.append("email",$("#emailIt").checked?"1":"0");
+  for(const f of $("#files").files)fd.append("files",f);
+  $("#askOut").classList.add("hide");$("#copyOut").classList.add("hide");
+  try{const j=await api("POST","/api/task",undefined,fd);pollAsk(j.id)}catch(e){toast(e.message)}
+};
+async function pollAsk(id){
+  clearTimeout(askPoll);const r=await api("GET","/api/runs/"+id);
+  if(r.status==="done"){$("#askStatus").textContent=r.detail||"Done";$("#askOut").textContent=r.output;$("#askOut").classList.remove("hide");$("#copyOut").classList.remove("hide");return}
+  if(r.status==="error"){$("#askStatus").textContent="Failed: "+r.detail;return}
+  $("#askStatus").textContent=(r.detail||"Queued")+"...";askPoll=setTimeout(()=>pollAsk(id),2500);
+}
+$("#copyOut").onclick=()=>navigator.clipboard.writeText($("#askOut").textContent).then(()=>toast("Copied"));
+
+// ----- scheduled tab -----
+function fillSched(){
+  const dbox=$("#sDays");if(!dbox.children.length)DAYS.forEach((d,i)=>dbox.append(el("label",{},el("input",{type:"checkbox",value:i,checked:true}),d)));
+  const list=$("#schedList");list.textContent="";
+  if(!S.schedules.length)list.append(el("p",{class:"mute",textContent:"Nothing scheduled yet."}));
+  S.schedules.forEach(s=>{const p=S.presets.find(x=>x.id===s.preset_id);
+    list.append(el("div",{class:"card"},el("b",{textContent:s.name}),el("div",{class:"mute",textContent:(p?p.name:"(missing preset)")+" · "+s.days.map(d=>DAYS[d]).join(" ")+" at "+s.time+" · emailed"}),el("p",{},el("button",{class:"btn del",textContent:"Remove",on:{click:async()=>{await api("DELETE","/api/schedules/"+s.id);S=await api("GET","/api/state");fillSched()}}}))))});
+}
+$("#sAdd").onclick=async()=>{
+  try{await api("POST","/api/schedules",{name:$("#sName").value,preset_id:$("#sPreset").value,time:$("#sTime").value,days:[...$("#sDays").querySelectorAll("input:checked")].map(i=>+i.value),note:$("#sNote").value,urls:$("#sUrls").value.split("\n")});S=await api("GET","/api/state");fillSched();$("#sName").value="";toast("Scheduled")}catch(e){toast(e.message)}
+};
+
+// ----- history + system -----
+async function loadHist(){
+  const rs=await api("GET","/api/runs");const tb=$("#histBody");tb.textContent="";
+  rs.forEach(r=>tb.append(el("tr",{},el("td",{textContent:new Date(r.created*1000).toLocaleString()}),el("td",{textContent:r.title}),el("td",{textContent:r.status+(r.emailed?" · emailed":"")}),el("td",{},el("button",{class:"btn alt",textContent:"Open",on:{click:()=>openRun(r)}})))));
+}
+async function openRun(r){
+  const full=await api("GET","/api/runs/"+r.id);const v=$("#histView");v.textContent="";
+  if(full.kind==="briefing"&&full.output){v.append(el("iframe",{sandbox:"",srcdoc:full.output}))}
+  else v.append(el("pre",{class:"out",textContent:full.output||full.detail||"(empty)"}));
+  v.scrollIntoView();
+}
+async function loadSys(){
+  S=await api("GET","/api/state");const s=S.status,box=$("#sysInfo");box.textContent="";
+  const line=(k,v,good)=>box.append(el("div",{class:"card"},el("b",{textContent:k+": "}),el("span",{class:good===undefined?"":(good?"ok":"bad"),textContent:v})));
+  line("PC and Ollama",s.pc_up?"reachable":"asleep or off",s.pc_up);line("Email",s.email_ready?"configured":"not configured (see .env)",s.email_ready);
+  line("Recipients",s.recipients.join(", ")||"none set",s.recipients.length>0);line("FreshRSS",s.freshrss_ready?"configured":"not configured (see .env)",s.freshrss_ready);
+  line("Models",s.text_model+" (text), "+s.vision_model+" (vision)");line("PC address",s.pc_ip);
+}
+$("#wakeBtn").onclick=async()=>{try{await api("POST","/api/pc/wake",{});toast("Magic packet sent")}catch(e){toast(e.message)}};
+$("#offBtn").onclick=async()=>{if(confirm("Power the PC off now?")){try{await api("POST","/api/pc/off",{});toast("Power-off sent")}catch(e){toast(e.message)}}};
+setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");$("#pcState").textContent="PC: "+(s.status.pc_up?"on":"off");$("#pcState").className="pill "+(s.status.pc_up?"ok":"")}catch(e){}},15000);
+
+$("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};
+$("#pw").addEventListener("keydown",e=>{if(e.key==="Enter")$("#loginBtn").click()});
+$("#logout").onclick=async()=>{await api("POST","/api/logout",{});showLogin()};
+start();
+</script>
+</body>
+</html>
