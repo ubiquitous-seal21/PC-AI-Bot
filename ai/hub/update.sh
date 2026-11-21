@@ -11,14 +11,12 @@ export GIT_CONFIG_VALUE_0='*'
 git_safe() {
   git -c safe.directory='*' "$@"
 }
-git_safe config --global --add safe.directory '*' >/dev/null 2>&1 || true
 
-# The helper container runs as root. Reapply the repository host owner's
-# UID/GID so Git remains writable after the helper has fetched or stashed files.
-if [ "$(id -u)" -eq 0 ] && [ -d "$REPO" ]; then
-  REPO_UID=$(stat -c '%u' "$REPO")
-  REPO_GID=$(stat -c '%g' "$REPO")
-  chown -R "$REPO_UID:$REPO_GID" "$REPO" 2>/dev/null || true
+# A helper temporarily owns /repo as root, eliminating Git's dubious-ownership
+# check. Restore the host owner before it exits.
+if [ "$(id -u)" -eq 0 ] && [ -n "${REPO_UID:-}" ] && [ -n "${REPO_GID:-}" ]; then
+  chown -R 0:0 "$REPO" 2>/dev/null || true
+  trap 'chown -R "$REPO_UID:$REPO_GID" "$REPO" 2>/dev/null || true' EXIT
 fi
 
 if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
@@ -41,10 +39,10 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   REPO_HOME=$(dirname "$REPO_SOURCE")
   REPO_UID=$(stat -c '%u' "$REPO_SOURCE")
   REPO_GID=$(stat -c '%g' "$REPO_SOURCE")
-  HELPER_SETUP='git config --global --replace-all safe.directory "*" >/dev/null 2>&1 || true; git config --global --add safe.directory "*" >/dev/null 2>&1 || true'
+  HELPER_SETUP='chown -R 0:0 /repo 2>/dev/null || true; git config --global --replace-all safe.directory "*" >/dev/null 2>&1 || true; git config --global --add safe.directory "*" >/dev/null 2>&1 || true'
   if [ -f "$REPO_HOME/.gitconfig" ] && [ -d "$REPO_HOME/.config/gh" ]; then
     docker run -d --name "$HELPER" --network host --rm \
-      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e REPO_UID="$REPO_UID" -e REPO_GID="$REPO_GID" -e HOME=/tmp/updater \
       -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
@@ -55,7 +53,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
       exit 0
   elif [ -f "$REPO_HOME/.gitconfig" ] && [ -f "$REPO_HOME/.git-credentials" ]; then
     docker run -d --name "$HELPER" --network host --rm \
-      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e REPO_UID="$REPO_UID" -e REPO_GID="$REPO_GID" -e HOME=/tmp/updater \
       -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
@@ -66,7 +64,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
       exit 0
   elif [ -f "$REPO_HOME/.gitconfig" ]; then
     docker run -d --name "$HELPER" --network host --rm \
-      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e REPO_UID="$REPO_UID" -e REPO_GID="$REPO_GID" -e HOME=/tmp/updater \
       -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
@@ -76,7 +74,7 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
       exit 0
   else
     docker run -d --name "$HELPER" --network host --rm \
-      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e REPO_UID="$REPO_UID" -e REPO_GID="$REPO_GID" -e HOME=/tmp/updater \
       -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
