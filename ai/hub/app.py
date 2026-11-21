@@ -328,22 +328,19 @@ def update_status():
             process_log = f.read()[-4000:]
     except FileNotFoundError:
         pass
-    if message.startswith("Update complete"):
+    progress = 5
+    if message.startswith("Update progress:"):
+        phase = message.split(":", 2)
+        if len(phase) >= 2:
+            try:
+                progress = max(5, min(95, int(phase[1])))
+            except ValueError:
+                pass
+        message = phase[2].strip() if len(phase) == 3 else message
+    elif message.startswith("Update complete"):
         progress = 100
-    elif message.startswith("Update failed") or message.startswith("Update blocked"):
+    elif message.startswith(("Update failed", "Update blocked")):
         progress = 100
-    elif "Docker daemon" in message or "container rebuild" in message:
-        progress = 90
-    elif "GitHub" in message or "fetch" in message:
-        progress = 35
-    elif "pull" in message.lower() or "revision" in message.lower():
-        progress = 60
-    elif "preserve" in message.lower():
-        progress = 20
-    elif "started" in message.lower():
-        progress = 10
-    else:
-        progress = 5
     return ok(message=message, process_log=process_log, running=_update_running,
               progress=progress)
 

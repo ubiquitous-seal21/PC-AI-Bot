@@ -1,6 +1,11 @@
 FROM python:3.12-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg openssh-client ca-certificates tzdata git curl tar docker.io \
+ && apt-get install -y --no-install-recommends ffmpeg openssh-client ca-certificates tzdata git curl tar docker.io gnupg \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 RUN arch="$(dpkg --print-architecture)" && case "$arch" in \
       amd64) compose_arch=x86_64 ;; \

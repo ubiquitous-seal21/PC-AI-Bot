@@ -32,12 +32,40 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   HELPER="ai-hub-updater-$$"
   if docker rm -f "$HELPER" >/dev/null 2>&1; then :; fi
   printf 'Update started in a helper container\n' > "$STATUS"
-  if docker run -d --name "$HELPER" --network host --rm \
-    -e AI_HUB_UPDATE_HELPER=1 \
-    -v "$REPO_SOURCE:/repo:rw" \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    "$IMAGE" sh -c 'exec /repo/ai/hub/update.sh' >/dev/null; then
-    exit 0
+  REPO_HOME=$(dirname "$REPO_SOURCE")
+  if [ -f "$REPO_HOME/.gitconfig" ] && [ -d "$REPO_HOME/.config/gh" ]; then
+    docker run -d --name "$HELPER" --network host --rm \
+      -e AI_HUB_UPDATE_HELPER=1 \
+      -v "$REPO_SOURCE:/repo:rw" \
+      -v "$REPO_HOME/.gitconfig:/host/.gitconfig:ro" \
+      -v "$REPO_HOME/.config/gh:/root/.config/gh:ro" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      "$IMAGE" sh -c 'cp /host/.gitconfig /root/.gitconfig 2>/dev/null || true; gh auth setup-git >/dev/null 2>&1 || true; exec /repo/ai/hub/update.sh' >/dev/null &&
+      exit 0
+  elif [ -f "$REPO_HOME/.gitconfig" ] && [ -f "$REPO_HOME/.git-credentials" ]; then
+    docker run -d --name "$HELPER" --network host --rm \
+      -e AI_HUB_UPDATE_HELPER=1 \
+      -v "$REPO_SOURCE:/repo:rw" \
+      -v "$REPO_HOME/.gitconfig:/root/.gitconfig:ro" \
+      -v "$REPO_HOME/.git-credentials:/root/.git-credentials:ro" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      "$IMAGE" sh -c 'git config --global credential.helper "store --file=/root/.git-credentials"; exec /repo/ai/hub/update.sh' >/dev/null &&
+      exit 0
+  elif [ -f "$REPO_HOME/.gitconfig" ]; then
+    docker run -d --name "$HELPER" --network host --rm \
+      -e AI_HUB_UPDATE_HELPER=1 \
+      -v "$REPO_SOURCE:/repo:rw" \
+      -v "$REPO_HOME/.gitconfig:/root/.gitconfig:ro" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      "$IMAGE" sh -c 'exec /repo/ai/hub/update.sh' >/dev/null &&
+      exit 0
+  else
+    docker run -d --name "$HELPER" --network host --rm \
+      -e AI_HUB_UPDATE_HELPER=1 \
+      -v "$REPO_SOURCE:/repo:rw" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      "$IMAGE" sh -c 'exec /repo/ai/hub/update.sh' >/dev/null &&
+      exit 0
   fi
   printf 'Update failed: could not start the update helper\n' > "$STATUS"
   exit 1
@@ -60,7 +88,7 @@ mkdir -p "$BACKUP/data" "$BACKUP/ssh"
 [ -f "$REPO/data/hub.db" ] && cp "$REPO/data/hub.db" "$BACKUP/hub.db"
 [ -d "$REPO/ssh" ] && cp -a "$REPO/ssh/." "$BACKUP/ssh/"
 
-printf 'Update started: preparing backup\n' > "$STATUS"
+printf 'Update progress:10:Preparing backup\n' > "$STATUS"
 
 if ! docker info >/dev/null 2>&1; then
   printf 'Update failed: Docker daemon is unavailable from the Hub container\n' > "$STATUS"
@@ -81,7 +109,7 @@ if [ -n "$LOCAL_CHANGES" ]; then
   fi
   SOURCE_STASHED=1
 fi
-printf 'Update progress: preserving local changes\n' > "$STATUS"
+printf 'Update progress:25:Preserving local source changes\n' > "$STATUS"
 
 FETCH_ERR=$(mktemp)
 if ! git -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune origin 2>"$FETCH_ERR"; then
@@ -92,12 +120,12 @@ if ! git -C "$REPO" -c http.timeout=30 -c http.connectTimeout=15 fetch --prune o
     printf 'Update failed: could not fetch GitHub\n' > "$STATUS"
   fi
   rm -f "$FETCH_ERR"
-  printf 'Update progress: GitHub fetch complete\n' > "$STATUS"
   if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
   restore_settings
   exit 1
 fi
 rm -f "$FETCH_ERR"
+printf 'Update progress:45:Fetching GitHub changes\n' > "$STATUS"
 
 if [ -n "$BRANCH" ]; then
   if ! git -C "$REPO" pull --ff-only origin "$BRANCH"; then
@@ -112,10 +140,10 @@ else
   restore_settings
   exit 1
 fi
-printf 'Update progress: pulling latest source\n' > "$STATUS"
+printf 'Update progress:70:Fast-forwarding repository\n' > "$STATUS"
 
 restore_settings
-printf 'Update progress: rebuilding the Hub\n' > "$STATUS"
+printf 'Update progress:90:Rebuilding the Hub\n' > "$STATUS"
 
 if docker compose -f "$REPO/docker-compose.yml" --project-name ai-hub --project-directory "$REPO" up -d --build --force-recreate --remove-orphans ai-hub; then
   printf 'Update complete: %s\n' "$(git -C "$REPO" rev-parse --short HEAD)" > "$STATUS"
