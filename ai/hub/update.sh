@@ -5,6 +5,8 @@ REPO=/repo
 STATUS="$REPO/.ai-hub-update.log"
 BACKUP=$(mktemp -d)
 
+git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
+
 restore_settings() {
   if [ -f "$BACKUP/.env" ]; then cp "$BACKUP/.env" "$REPO/.env"; fi
   if [ -f "$BACKUP/hub.db" ]; then
@@ -32,20 +34,21 @@ fi
 
 OLD_HEAD=$(git -C "$REPO" rev-parse HEAD)
 BRANCH=$(git -C "$REPO" branch --show-current)
-COMPOSE_STASHED=0
+LOCAL_CHANGES="$(git -C "$REPO" status --porcelain)"
+SOURCE_STASHED=0
 
-if [ -n "$(git -C "$REPO" status --porcelain -- docker-compose.yml)" ]; then
-  if ! git -C "$REPO" stash push -m "PC-AI-Bot server compose backup" -- docker-compose.yml; then
-    printf 'Update failed: could not preserve local docker-compose.yml changes\n' > "$STATUS"
+if [ -n "$LOCAL_CHANGES" ]; then
+  if ! git -C "$REPO" stash push --include-untracked -m "PC-AI-Bot pre-update source backup"; then
+    printf 'Update failed: could not preserve local source changes\n' > "$STATUS"
     restore_settings
     exit 1
   fi
-  COMPOSE_STASHED=1
+  SOURCE_STASHED=1
 fi
 
 if ! git -C "$REPO" fetch origin; then
   printf 'Update failed: could not fetch GitHub\n' > "$STATUS"
-  if [ "$COMPOSE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
+  if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
   restore_settings
   exit 1
 fi
@@ -53,26 +56,18 @@ fi
 if [ -n "$BRANCH" ]; then
   if ! git -C "$REPO" pull --ff-only origin "$BRANCH"; then
     printf 'Update failed: GitHub pull was not fast-forwardable\n' > "$STATUS"
-    if [ "$COMPOSE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
+    if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
     restore_settings
     exit 1
   fi
 else
   printf 'Update failed: repository is in detached HEAD state\n' > "$STATUS"
-  if [ "$COMPOSE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
+  if [ "$SOURCE_STASHED" -eq 1 ]; then git -C "$REPO" stash pop >/dev/null 2>&1 || true; fi
   restore_settings
   exit 1
 fi
 
 restore_settings
-
-if [ "$COMPOSE_STASHED" -eq 1 ]; then
-  if ! git -C "$REPO" stash pop; then
-    printf 'Update blocked: local docker-compose.yml changes conflicted with the update\n' > "$STATUS"
-    restore_settings
-    exit 1
-  fi
-fi
 
 if docker compose -f "$REPO/docker-compose.yml" --project-directory "$REPO" up -d --build --force-recreate ai-hub; then
   printf 'Update complete: %s\n' "$(git -C "$REPO" rev-parse --short HEAD)" > "$STATUS"
