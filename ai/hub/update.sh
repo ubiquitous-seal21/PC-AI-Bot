@@ -36,34 +36,44 @@ if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
   if docker rm -f "$HELPER" >/dev/null 2>&1; then :; fi
   printf 'Update started in a helper container\n' > "$STATUS"
   REPO_HOME=$(dirname "$REPO_SOURCE")
+  REPO_UID=$(stat -c '%u' "$REPO_SOURCE")
+  REPO_GID=$(stat -c '%g' "$REPO_SOURCE")
   if [ -f "$REPO_HOME/.gitconfig" ] && [ -d "$REPO_HOME/.config/gh" ]; then
     docker run -d --name "$HELPER" --network host --rm \
+      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
-      -v "$REPO_HOME/.gitconfig:/host/.gitconfig:ro" \
-      -v "$REPO_HOME/.config/gh:/root/.config/gh:ro" \
+      -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
+      -v "$REPO_HOME/.config/gh:/tmp/updater/.config/gh:ro" \
       -v /var/run/docker.sock:/var/run/docker.sock \
-      "$IMAGE" sh -c 'cp /host/.gitconfig /root/.gitconfig 2>/dev/null || true; gh auth setup-git >/dev/null 2>&1 || true; exec /repo/ai/hub/update.sh' >/dev/null &&
+      "$IMAGE" sh -c 'mkdir -p /tmp/updater/.config; gh auth setup-git >/dev/null 2>&1 || true; exec /repo/ai/hub/update.sh' >/dev/null &&
       exit 0
   elif [ -f "$REPO_HOME/.gitconfig" ] && [ -f "$REPO_HOME/.git-credentials" ]; then
     docker run -d --name "$HELPER" --network host --rm \
+      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
-      -v "$REPO_HOME/.gitconfig:/root/.gitconfig:ro" \
-      -v "$REPO_HOME/.git-credentials:/root/.git-credentials:ro" \
+      -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
+      -v "$REPO_HOME/.git-credentials:/tmp/updater/.git-credentials:ro" \
       -v /var/run/docker.sock:/var/run/docker.sock \
-      "$IMAGE" sh -c 'git config --global credential.helper "store --file=/root/.git-credentials"; exec /repo/ai/hub/update.sh' >/dev/null &&
+      "$IMAGE" sh -c 'git config --global credential.helper "store --file=/tmp/updater/.git-credentials"; exec /repo/ai/hub/update.sh' >/dev/null &&
       exit 0
   elif [ -f "$REPO_HOME/.gitconfig" ]; then
     docker run -d --name "$HELPER" --network host --rm \
+      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
-      -v "$REPO_HOME/.gitconfig:/root/.gitconfig:ro" \
+      -v "$REPO_HOME/.gitconfig:/tmp/updater/.gitconfig:ro" \
       -v /var/run/docker.sock:/var/run/docker.sock \
       "$IMAGE" sh -c 'exec /repo/ai/hub/update.sh' >/dev/null &&
       exit 0
   else
     docker run -d --name "$HELPER" --network host --rm \
+      -u "$REPO_UID:$REPO_GID" -e HOME=/tmp/updater \
+      -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
       -e AI_HUB_UPDATE_HELPER=1 \
       -v "$REPO_SOURCE:/repo:rw" \
       -v /var/run/docker.sock:/var/run/docker.sock \
