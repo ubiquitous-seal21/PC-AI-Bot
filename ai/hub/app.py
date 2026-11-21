@@ -31,10 +31,29 @@ _update_running = False
 UPDATE_STATUS = os.environ.get("UPDATE_STATUS", "/repo/.ai-hub-update.log")
 UPDATE_SCRIPT = os.environ.get("UPDATE_SCRIPT", "/app/update.sh")
 
+try:
+    with open(UPDATE_STATUS, "r", encoding="utf-8") as status:
+        initial_update_status = status.read().strip()
+except FileNotFoundError:
+    initial_update_status = ""
+_update_running = bool(initial_update_status.startswith(("Update started", "Update in progress")))
+
 
 def mark_update_finished(proc):
     proc.wait()
     global _update_running
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            with open(UPDATE_STATUS, "r", encoding="utf-8") as status:
+                message = status.read().strip()
+        except FileNotFoundError:
+            message = ""
+        if message.startswith(("Update complete:", "Update failed:", "Update blocked")):
+            with _update_lock:
+                _update_running = False
+            return
+        time.sleep(1)
     with _update_lock:
         _update_running = False
 
@@ -259,8 +278,9 @@ def pc_wake():
 
 @app.post("/api/pc/off")
 def pc_off():
-    E.power_off_pc()
-    return ok()
+    if E.power_off_pc():
+        return ok()
+    return err("Could not power off the PC. Check SSH, PC address, and power-off configuration.", 502)
 
 
 @app.put("/api/pc/pause")

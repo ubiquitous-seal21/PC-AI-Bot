@@ -17,6 +17,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import smtplib
 import socket
 import sqlite3
@@ -455,11 +456,21 @@ def magic_packet():
 
 def send_magic():
     pkt = magic_packet()
+    addresses = []
+    for addr in (LAN_BROADCAST, "255.255.255.255"):
+        addr = str(addr).strip()
+        if addr and addr not in addresses:
+            addresses.append(addr)
+    if not addresses:
+        raise ValueError("LAN_BROADCAST is empty")
+
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    for addr in {LAN_BROADCAST, "255.255.255.255"}:
-        s.sendto(pkt, (addr, 9))
-    s.close()
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for addr in addresses:
+            s.sendto(pkt, (addr, 9))
+    finally:
+        s.close()
 
 
 def ensure_pc(timeout=300):
@@ -499,12 +510,17 @@ def pc_job(prog=None):
 
 
 def power_off_pc():
-    if not PC_USER:
+    if not PC_USER or not PC_IP:
+        log("power-off failed: PC_SSH_USER and PC_IP must be configured")
+        return False
+    remote_command = shlex.split(PC_OFF_CMD)
+    if not remote_command:
+        log("power-off failed: PC_OFF_CMD is empty")
         return False
     cmd = ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
            "-o", "StrictHostKeyChecking=accept-new",
            "-o", f"UserKnownHostsFile={DATA}/known_hosts",
-           f"{PC_USER}@{PC_IP}", PC_OFF_CMD]
+           f"{PC_USER}@{PC_IP}", *remote_command]
     try:
         p = run(cmd, 30)
         log("power-off sent, exit code", p.returncode, p.stderr.strip()[:200])

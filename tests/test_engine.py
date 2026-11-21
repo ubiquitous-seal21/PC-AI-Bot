@@ -30,6 +30,23 @@ class EngineSafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.e.magic_packet()
 
+    def test_magic_packet_is_sent_to_configured_and_limited_broadcast(self):
+        original_mac = self.e.PC_MAC
+        original_broadcast = self.e.LAN_BROADCAST
+        try:
+            self.e.PC_MAC = "AA:BB:CC:DD:EE:FF"
+            self.e.LAN_BROADCAST = "192.168.1.255"
+            with patch.object(self.e.socket, "socket") as socket_factory:
+                sock = socket_factory.return_value
+                self.e.send_magic()
+                sent_addresses = [call.args[1][0] for call in sock.sendto.call_args_list]
+                self.assertIn("192.168.1.255", sent_addresses)
+                self.assertIn("255.255.255.255", sent_addresses)
+                sock.close.assert_called_once()
+        finally:
+            self.e.PC_MAC = original_mac
+            self.e.LAN_BROADCAST = original_broadcast
+
     def test_active_session_detection_blocks_shutdown_for_active_session(self):
         with patch.object(self.e, "run", return_value=type("P", (), {
             "returncode": 0, "stdout": "Active=yes\nState=active\n", "stderr": ""
@@ -47,6 +64,33 @@ class EngineSafetyTests(unittest.TestCase):
             "returncode": 255, "stdout": "", "stderr": "offline"
         })):
             self.assertTrue(self.e.pc_has_active_sessions())
+
+    def test_power_off_requires_pc_address_and_user(self):
+        original_ip = self.e.PC_IP
+        original_user = self.e.PC_USER
+        try:
+            self.e.PC_IP = ""
+            self.e.PC_USER = "test-user"
+            self.assertFalse(self.e.power_off_pc())
+        finally:
+            self.e.PC_IP = original_ip
+            self.e.PC_USER = original_user
+
+    def test_power_off_sends_remote_command_as_separate_arguments(self):
+        original_ip = self.e.PC_IP
+        original_cmd = self.e.PC_OFF_CMD
+        try:
+            self.e.PC_IP = "192.168.1.100"
+            self.e.PC_OFF_CMD = "sudo systemctl poweroff"
+            with patch.object(self.e, "run", return_value=type("P", (), {
+                "returncode": 0, "stdout": "", "stderr": ""
+            })) as run:
+                self.assertTrue(self.e.power_off_pc())
+                command = run.call_args.args[0]
+                self.assertEqual(command[-3:], ["sudo", "systemctl", "poweroff"])
+        finally:
+            self.e.PC_IP = original_ip
+            self.e.PC_OFF_CMD = original_cmd
 
     def test_pause_blocks_chat_and_worker_busy_blocks_chat(self):
         self.e.state["worker_busy"] = True

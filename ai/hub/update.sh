@@ -7,6 +7,34 @@ BACKUP=$(mktemp -d)
 
 git config --global --add safe.directory "$REPO" >/dev/null 2>&1 || true
 
+if [ "${AI_HUB_UPDATE_HELPER:-0}" != "1" ]; then
+  if ! docker info >/dev/null 2>&1; then
+    printf 'Update failed: Docker daemon is unavailable from the Hub container\n' > "$STATUS"
+    exit 1
+  fi
+  IMAGE=$(docker inspect ai-hub --format '{{.Image}}' 2>/dev/null) || {
+    printf 'Update failed: could not identify the running Hub image\n' > "$STATUS"
+    exit 1
+  }
+  REPO_SOURCE=$(docker inspect ai-hub --format '{{range .Mounts}}{{if eq .Destination "/repo"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+  if [ -z "$REPO_SOURCE" ]; then
+    printf 'Update failed: could not identify the repository mount\n' > "$STATUS"
+    exit 1
+  fi
+  HELPER="ai-hub-updater-$$"
+  if docker rm -f "$HELPER" >/dev/null 2>&1; then :; fi
+  printf 'Update started in a helper container\n' > "$STATUS"
+  if docker run -d --name "$HELPER" --rm \
+    -e AI_HUB_UPDATE_HELPER=1 \
+    -v "$REPO_SOURCE:/repo:rw" \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    "$IMAGE" sh -c 'exec /app/update.sh' >/dev/null; then
+    exit 0
+  fi
+  printf 'Update failed: could not start the update helper\n' > "$STATUS"
+  exit 1
+fi
+
 restore_settings() {
   if [ -f "$BACKUP/.env" ]; then cp "$BACKUP/.env" "$REPO/.env"; fi
   if [ -f "$BACKUP/hub.db" ]; then
