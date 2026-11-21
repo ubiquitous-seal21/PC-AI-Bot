@@ -2,6 +2,7 @@ services:
   ai-hub:
     build: ./ai/hub
     container_name: ai-hub
+    network_mode: host
     restart: unless-stopped
     env_file: .env
     volumes:
@@ -9,8 +10,3 @@ services:
       - ./ssh:/ssh:ro
       - ./:/repo:rw
       - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - caddy_net
-networks:
-  caddy_net:
-    external: true

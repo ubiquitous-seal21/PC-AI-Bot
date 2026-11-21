@@ -105,7 +105,7 @@ fi
 
 restore_settings
 
-if docker compose -f "$REPO/docker-compose.yml" --project-directory "$REPO" up -d --build --force-recreate ai-hub; then
+if docker compose -f "$REPO/docker-compose.yml" --project-name ai-hub --project-directory "$REPO" up -d --build --force-recreate --remove-orphans ai-hub; then
   printf 'Update complete: %s\n' "$(git -C "$REPO" rev-parse --short HEAD)" > "$STATUS"
   rm -rf "$BACKUP"
   exit 0
