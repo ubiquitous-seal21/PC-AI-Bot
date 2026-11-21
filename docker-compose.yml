@@ -3,10 +3,14 @@ services:
     build: ./ai/hub
     container_name: ai-hub
     restart: unless-stopped
-    network_mode: host      # lets the container send Wake-on-LAN broadcasts
     env_file: .env
     volumes:
       - ./data:/data
       - ./ssh:/ssh:ro
       - ./:/repo:rw
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - caddy_net
+networks:
+  caddy_net:
+    external: true
