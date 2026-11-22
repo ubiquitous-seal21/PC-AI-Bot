@@ -666,6 +666,33 @@ Do not expose this application without TLS and network restrictions.
 
 ---
 
+## Update an existing installation
+
+On the always-on server:
+
+```bash
+cd ~/ai
+git pull --ff-only
+docker compose up -d --build --force-recreate
+docker compose ps
+docker compose logs --tail=100 ai-hub
+```
+
+Keep `IDLE_OFF_MIN=30` or higher until the rebuilt hub is running. Verify
+automatic shutdown behavior on the Arch PC with the greeter or KDE lockscreen
+active: it should power off after the configured idle period. If a real desktop
+user session is unlocked and active, the PC should remain on.
+
+The update includes locked-session detection for systemd-logind. If SSH or
+session checks stop working, leave automatic shutdown disabled by setting
+`IDLE_OFF_MIN=0` and rerun the setup verifier:
+
+```bash
+./scripts/verify_setup.sh
+```
+
+---
+
 ## Daily operations
 
 Run the setup verifier after Docker and SSH are configured:

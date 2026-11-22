@@ -61,6 +61,22 @@ class EngineSafetyTests(unittest.TestCase):
         })):
             self.assertFalse(self.e.pc_has_active_sessions())
 
+    def test_locked_kde_lockscreen_does_not_block_shutdown(self):
+        with patch.object(self.e, "run", return_value=type("P", (), {
+            "returncode": 0,
+            "stdout": "Active=yes State=active LockedHint=yes IdleHint=no Type=x11 Class=user\n",
+            "stderr": ""
+        })):
+            self.assertFalse(self.e.pc_has_active_sessions())
+
+    def test_greeter_session_does_not_block_shutdown(self):
+        with patch.object(self.e, "run", return_value=type("P", (), {
+            "returncode": 0,
+            "stdout": "Active=yes State=active LockedHint=no IdleHint=no Type=greeter Class=greeter\n",
+            "stderr": ""
+        })):
+            self.assertFalse(self.e.pc_has_active_sessions())
+
     def test_active_session_check_fails_closed_on_ssh_error(self):
         with patch.object(self.e, "run", return_value=type("P", (), {
             "returncode": 255, "stdout": "", "stderr": "offline"

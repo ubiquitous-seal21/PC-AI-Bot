@@ -572,14 +572,28 @@ def pc_has_active_sessions():
            "if [ -z \"$session_output\" ]; then exit 0; fi; "
            "printf '%s\\n' \"$session_output\" | awk '{print $1}' | "
            "while read -r sid; do loginctl show-session \"$sid\" "
-           "--no-pager -p State -p Active -p IdleHint -p Remote 2>/dev/null; done"]
+           "--no-pager -p State -p Active -p IdleHint -p LockedHint -p Remote "
+           "-p Type -p Class 2>/dev/null | tr '\\n' ' '; printf '\\n'; done"]
     try:
         p = run(cmd, 30)
         if p.returncode != 0:
             log("active-session check failed:", p.stderr.strip()[:200])
             return True
         for line in p.stdout.splitlines():
-            if line.strip() in ("Active=yes", "State=active", "IdleHint=no"):
+            fields = {}
+            for field in line.split():
+                if "=" in field:
+                    key, value = field.split("=", 1)
+                    fields[key] = value
+            if fields.get("Remote") == "yes":
+                continue
+            if fields.get("LockedHint") == "yes":
+                continue
+            if fields.get("Type") == "greeter" or fields.get("Class") == "greeter":
+                continue
+            if (fields.get("Active") == "yes"
+                    or fields.get("State") == "active"
+                    or fields.get("IdleHint") == "no"):
                 return True
         return False
     except Exception as e:
