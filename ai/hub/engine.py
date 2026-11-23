@@ -573,12 +573,20 @@ def pc_has_active_sessions():
            "printf '%s\\n' \"$session_output\" | awk '{print $1}' | "
            "while read -r sid; do loginctl show-session \"$sid\" "
            "--no-pager -p State -p Active -p IdleHint -p LockedHint -p Remote "
-           "-p Type -p Class 2>/dev/null | tr '\\n' ' '; printf '\\n'; done"]
+           "-p Type -p Class 2>/dev/null | tr '\\n' ' '; printf '\\n'; done; "
+           "if pgrep -x kscreenlocker_greet >/dev/null 2>&1 || "
+           "pgrep -x gnome-screensaver-dialog >/dev/null 2>&1 || "
+           "pgrep -x i3lock >/dev/null 2>&1 || "
+           "pgrep -x swaylock >/dev/null 2>&1 || "
+           "pgrep -x hyprlock >/dev/null 2>&1; then "
+           "echo 'LockedDesktop=yes'; fi"]
     try:
         p = run(cmd, 30)
         if p.returncode != 0:
             log("active-session check failed:", p.stderr.strip()[:200])
             return True
+        if "LockedDesktop=yes" in p.stdout:
+            return False
         for line in p.stdout.splitlines():
             fields = {}
             for field in line.split():
