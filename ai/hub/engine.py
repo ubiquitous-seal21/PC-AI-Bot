@@ -560,6 +560,63 @@ def power_off_pc():
         return False
 
 
+def pc_session_check_shell(poweroff=False):
+    remote_command = shlex.join(shlex.split(PC_OFF_CMD)) if poweroff else ""
+    return (
+        "session_output=$(loginctl list-sessions --no-legend 2>/dev/null) || exit 2; "
+        "active=0; "
+        "for sid in $(printf '%s\\n' \"$session_output\" | awk '{print $1}'); do "
+        "[ -n \"$sid\" ] || continue; "
+        "props=$(loginctl show-session \"$sid\" --no-pager "
+        "-p State -p Active -p IdleHint -p LockedHint -p Remote -p Type -p Class "
+        "2>/dev/null) || exit 2; "
+        "remote=$(printf '%s\\n' \"$props\" | sed -n 's/^Remote=//p' | head -n1); "
+        "locked=$(printf '%s\\n' \"$props\" | sed -n 's/^LockedHint=//p' | head -n1); "
+        "stype=$(printf '%s\\n' \"$props\" | sed -n 's/^Type=//p' | head -n1); "
+        "class=$(printf '%s\\n' \"$props\" | sed -n 's/^Class=//p' | head -n1); "
+        "if [ \"$locked\" != yes ] "
+        "&& [ \"$stype\" != greeter ] && [ \"$class\" != greeter ]; then "
+        "if printf '%s\\n' \"$props\" | grep -Eq '^(Active=yes|State=active|IdleHint=no)$'; then "
+        "active=1; fi; fi; "
+        "done; "
+        "locked_desktop=0; "
+        "for exe in /proc/[0-9]*/exe; do "
+        "name=$(readlink \"$exe\" 2>/dev/null) || continue; "
+        "case \"${name##*/}\" in "
+        "kscreenlocker_greet|kscreenlocker_g|gnome-screensaver-dialog|"
+        "i3lock|swaylock|hyprlock) locked_desktop=1; break ;; esac; done; "
+        "if [ \"$locked_desktop\" -eq 1 ]; then echo 'LockedDesktop=yes'; active=0; fi; "
+        "if [ \"$active\" -eq 1 ]; then echo 'SessionActive=yes'; exit 3; fi"
+        + (f"; exec {remote_command}; exit 0" if poweroff and remote_command else "; exit 0")
+    )
+
+
+def power_off_pc_if_idle():
+    if not PC_USER or not PC_IP:
+        return False
+    remote_command = shlex.split(PC_OFF_CMD)
+    if not remote_command:
+        log("power-off failed: PC_OFF_CMD is empty")
+        return False
+    cmd = ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+           "-o", "StrictHostKeyChecking=accept-new",
+           "-o", f"UserKnownHostsFile={DATA}/known_hosts",
+           f"{PC_USER}@{PC_IP}", pc_session_check_shell(poweroff=True)]
+    try:
+        p = run(cmd, 30)
+        if p.returncode == 3:
+            log("automatic power-off cancelled: active desktop session detected")
+            return False
+        if p.returncode != 0:
+            log("automatic power-off cancelled:", p.stderr.strip()[:200] or f"exit code {p.returncode}")
+            return False
+        log("automatic power-off sent")
+        return True
+    except Exception as e:
+        log("automatic power-off failed:", repr(e))
+        return False
+
+
 def pc_has_active_sessions():
     """Fail closed: if session state cannot be verified, do not auto-power-off."""
     if not PC_USER:
@@ -567,42 +624,20 @@ def pc_has_active_sessions():
     cmd = ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
            "-o", "StrictHostKeyChecking=accept-new",
            "-o", f"UserKnownHostsFile={DATA}/known_hosts",
-           f"{PC_USER}@{PC_IP}",
-           "session_output=$(loginctl list-sessions --no-legend 2>/dev/null); "
-           "if [ -z \"$session_output\" ]; then exit 0; fi; "
-           "printf '%s\\n' \"$session_output\" | awk '{print $1}' | "
-           "while read -r sid; do loginctl show-session \"$sid\" "
-           "--no-pager -p State -p Active -p IdleHint -p LockedHint -p Remote "
-           "-p Type -p Class 2>/dev/null | tr '\\n' ' '; printf '\\n'; done; "
-           "if pgrep -x kscreenlocker_greet >/dev/null 2>&1 || "
-           "pgrep -x gnome-screensaver-dialog >/dev/null 2>&1 || "
-           "pgrep -x i3lock >/dev/null 2>&1 || "
-           "pgrep -x swaylock >/dev/null 2>&1 || "
-           "pgrep -x hyprlock >/dev/null 2>&1; then "
-           "echo 'LockedDesktop=yes'; fi"]
+           f"{PC_USER}@{PC_IP}", pc_session_check_shell()]
     try:
         p = run(cmd, 30)
         if p.returncode != 0:
+            if p.returncode == 2:
+                log("active-session check failed: loginctl could not enumerate sessions")
+            elif p.returncode == 3:
+                return True
             log("active-session check failed:", p.stderr.strip()[:200])
+            return True
+        if "SessionActive=yes" in p.stdout:
             return True
         if "LockedDesktop=yes" in p.stdout:
             return False
-        for line in p.stdout.splitlines():
-            fields = {}
-            for field in line.split():
-                if "=" in field:
-                    key, value = field.split("=", 1)
-                    fields[key] = value
-            if fields.get("Remote") == "yes":
-                continue
-            if fields.get("LockedHint") == "yes":
-                continue
-            if fields.get("Type") == "greeter" or fields.get("Class") == "greeter":
-                continue
-            if (fields.get("Active") == "yes"
-                    or fields.get("State") == "active"
-                    or fields.get("IdleHint") == "no"):
-                return True
         return False
     except Exception as e:
         log("active-session check failed:", repr(e))
@@ -618,8 +653,8 @@ def idle_loop():
             idle = (state["busy"] == 0 and not state["worker_busy"]
                     and time.time() - state["last"] > IDLE_OFF_MIN * 60)
             woke = state["we_woke"]
-        if idle and woke and not pc_has_active_sessions():
-            if power_off_pc():
+        if idle and woke:
+            if power_off_pc_if_idle():
                 with _lock:
                     state["we_woke"] = False
 
@@ -1065,6 +1100,9 @@ def build_briefing(rid):
         if not items:
             html_out, text_out = render_briefing([("Top stories", [])], 0, 0, when)
             update_run(rid, status="ready", detail="No articles in the window", output=html_out, extra=text_out)
+            aid = r.get("account_id")
+            if aid is not None and r.get("auto"):
+                account_kv_set(aid, "last_build", datetime.date.today().isoformat())
             return
         groups = cluster(items)
         fh = focus_hash(s["focuses"])
@@ -1085,6 +1123,9 @@ def build_briefing(rid):
         html_out, text_out = render_briefing(sections, len(items), len(groups), when)
         update_run(rid, status="ready", output=html_out, extra=text_out,
                    detail=f"{shown} stories chosen from {len(items)} articles")
+        aid = r.get("account_id")
+        if aid is not None and r.get("auto"):
+            account_kv_set(aid, "last_build", datetime.date.today().isoformat())
     except Exception as e:
         log("briefing failed:", repr(e))
         update_run(rid, status="error", detail=str(e)[:500])
@@ -1096,9 +1137,24 @@ def build_briefing(rid):
 
 def send_briefing(rid):
     r = get_run(rid)
-    if not r or r["status"] not in ("ready", "sent"):
+    if not r:
         raise RuntimeError("That briefing is not ready yet.")
-    send_email(r["title"], r["extra"] or strip_html(r["output"]), r["output"], account_id=r.get("account_id"))
+    if r["status"] == "sent" and r["emailed"] == 1:
+        return
+    if r["status"] != "ready":
+        raise RuntimeError("That briefing is not ready yet.")
+    with _lock:
+        r = get_run(rid)
+        if r["status"] == "sent" and r["emailed"] == 1:
+            return
+        if r["status"] != "ready":
+            raise RuntimeError("That briefing is not ready yet.")
+        update_run(rid, status="sending")
+    try:
+        send_email(r["title"], r["extra"] or strip_html(r["output"]), r["output"], account_id=r.get("account_id"))
+    except Exception as e:
+        update_run(rid, status="ready", detail=f"Email failed: {e}")
+        raise
     update_run(rid, status="sent", emailed=1)
 
 
@@ -1122,11 +1178,15 @@ def tick(now=None):
             deliver = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
             start = deliver - datetime.timedelta(minutes=s["prep_minutes"])
             build_key = account_key(aid, "last_build")
-            if start <= now <= deliver + grace and kv_get(build_key) != today:
-                kv_set(build_key, today)
+            attempt_key = account_key(aid, "last_build_attempt")
+            if start <= now <= deliver + grace and kv_get(build_key) != today and kv_get(attempt_key) != today:
+                kv_set(attempt_key, today)
                 enqueue_briefing(auto=1, account_id=aid)
             if now >= deliver:
-                for r in sql("SELECT id FROM runs WHERE kind='briefing' AND status='ready' AND auto=1 AND emailed=0 AND account_id=?", (aid,)):
+                for r in sql("SELECT id,created FROM runs WHERE kind='briefing' AND status='ready' AND auto=1 AND emailed=0 AND account_id=?", (aid,)):
+                    run_date = datetime.datetime.fromtimestamp(r["created"]).date().isoformat()
+                    if run_date != today:
+                        continue
                     try:
                         send_briefing(r["id"])
                     except Exception as e:
@@ -1196,7 +1256,24 @@ def init():
     for key, value in legacy.items():
         if value is not None and account_kv_get(aid, key) is None:
             account_kv_set(aid, key, value)
-    sql("UPDATE runs SET status='error', detail='Interrupted by a restart' WHERE status IN ('queued','running')")
+    today = datetime.date.today().isoformat()
+    interrupted_briefings = sql(
+        "SELECT id,created,status FROM runs WHERE kind='briefing' "
+        "AND status IN ('queued','running','sending')"
+    )
+    for r in interrupted_briefings:
+        run_date = (datetime.datetime.fromtimestamp(r["created"]).date().isoformat()
+                    if r.get("created") else "")
+        if run_date == today:
+            if r["status"] == "sending":
+                update_run(r["id"], status="ready", detail="Restarted before delivery; ready to retry")
+            else:
+                update_run(r["id"], status="queued", detail="Restarted; waiting to resume")
+                jobs.put(("build", r["id"]))
+        else:
+            update_run(r["id"], status="error", detail="Interrupted by a restart")
+    sql("UPDATE runs SET status='error', detail='Interrupted by a restart' "
+        "WHERE kind!='briefing' AND status IN ('queued','running','sending')")
     get_presets(aid)
     set_paused(bool(kv_get("paused", False)))
 

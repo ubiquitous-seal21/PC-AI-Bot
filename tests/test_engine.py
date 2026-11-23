@@ -51,7 +51,7 @@ class EngineSafetyTests(unittest.TestCase):
 
     def test_active_session_detection_blocks_shutdown_for_active_session(self):
         with patch.object(self.e, "run", return_value=type("P", (), {
-            "returncode": 0, "stdout": "Active=yes\nState=active\n", "stderr": ""
+            "returncode": 0, "stdout": "SessionActive=yes\n", "stderr": ""
         })):
             self.assertTrue(self.e.pc_has_active_sessions())
 
@@ -85,6 +85,24 @@ class EngineSafetyTests(unittest.TestCase):
         })):
             self.assertFalse(self.e.pc_has_active_sessions())
 
+    def test_session_check_inspects_kde_locker_executable(self):
+        with patch.object(self.e, "run", return_value=type("P", (), {
+            "returncode": 0, "stdout": "", "stderr": ""
+        })) as run:
+            self.e.pc_has_active_sessions()
+            remote_command = " ".join(run.call_args.args[0])
+            self.assertIn("/proc/[0-9]*/exe", remote_command)
+            self.assertIn("kscreenlocker_greet", remote_command)
+
+    def test_remote_session_is_not_ignored(self):
+        with patch.object(self.e, "run", return_value=type("P", (), {
+            "returncode": 0, "stdout": "", "stderr": ""
+        })) as run:
+            self.e.pc_has_active_sessions()
+            remote_command = " ".join(run.call_args.args[0])
+            self.assertIn("remote=$(printf", remote_command)
+            self.assertIn("[ \"$locked\" != yes ]", remote_command)
+
     def test_active_session_check_fails_closed_on_ssh_error(self):
         with patch.object(self.e, "run", return_value=type("P", (), {
             "returncode": 255, "stdout": "", "stderr": "offline"
@@ -116,6 +134,27 @@ class EngineSafetyTests(unittest.TestCase):
                 self.assertEqual(command[-3:], ["sudo", "systemctl", "poweroff"])
         finally:
             self.e.PC_IP = original_ip
+            self.e.PC_OFF_CMD = original_cmd
+
+    def test_automatic_poweroff_rechecks_sessions_in_one_remote_command(self):
+        original_ip = self.e.PC_IP
+        original_user = self.e.PC_USER
+        original_cmd = self.e.PC_OFF_CMD
+        try:
+            self.e.PC_IP = "192.168.1.100"
+            self.e.PC_USER = "test-user"
+            self.e.PC_OFF_CMD = "sudo systemctl poweroff"
+            with patch.object(self.e, "run", return_value=type("P", (), {
+                "returncode": 3, "stdout": "SessionActive=yes\n", "stderr": ""
+            })) as run:
+                self.assertFalse(self.e.power_off_pc_if_idle())
+                remote_script = run.call_args.args[0][-1]
+                self.assertIn("loginctl list-sessions", remote_script)
+                self.assertIn("exec sudo systemctl poweroff", remote_script)
+                self.assertIn("exit 3", remote_script)
+        finally:
+            self.e.PC_IP = original_ip
+            self.e.PC_USER = original_user
             self.e.PC_OFF_CMD = original_cmd
 
     def test_pause_blocks_chat_and_worker_busy_blocks_chat(self):
