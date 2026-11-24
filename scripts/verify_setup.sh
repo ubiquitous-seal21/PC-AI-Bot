@@ -71,10 +71,16 @@ else
   fail "ai-hub container is not running"
 fi
 
-if curl --max-time 5 -fsSI "http://127.0.0.1:8088/" >/dev/null 2>&1; then
-  pass "The dashboard responds locally on port 8088"
+port="$(sed -n 's/^PORT=//p' .env 2>/dev/null | head -n1)"
+port="${port:-8088}"
+if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+  if curl --max-time 5 -fsSI "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+    pass "The dashboard responds locally on port $port"
+  else
+    fail "The dashboard does not respond locally on port $port"
+  fi
 else
-  fail "The dashboard does not respond locally on port 8088"
+  fail "PORT must be an integer from 1 to 65535"
 fi
 
 printf '\n%s\n' 'Automatic shutdown must remain disabled until every PC safety check passes.'

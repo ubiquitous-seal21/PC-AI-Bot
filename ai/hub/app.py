@@ -45,10 +45,14 @@ def guard():
     p = request.path
     if p in ("/", "/api/login") or p == "/favicon.ico":
         return None
-    if not session.get("auth") or not session.get("account_id"):
+    account_id = session.get("account_id")
+    if not session.get("auth") or not account_id or not E.get_account(account_id):
+        session.clear()
         return err("Please log in.", 401)
     if request.method != "GET" and request.headers.get("X-Hub") != "1":
         return err("Bad request.", 403)
+    if request.method != "GET" and request.is_json and not isinstance(request.get_json(silent=True), dict):
+        return err("Expected a JSON object.")
     return None
 
 
@@ -69,7 +73,9 @@ def login():
         n, until = _fails.get(ip, (0, 0))
         if until > time.time():
             return err("Too many attempts. Wait a minute.", 429)
-    raw = request.get_json(silent=True) or {}
+    raw = request.get_json(silent=True)
+    if not isinstance(raw, dict):
+        return err("Expected a JSON object.")
     pw = str(raw.get("password", ""))
     name = str(raw.get("username") or raw.get("name") or ACCOUNT_NAME).strip()
     E.ensure_default_account(PASSWORD, ACCOUNT_NAME)
@@ -138,12 +144,16 @@ def state():
                     "general": {"recipients": ", ".join(E.get_recipients(aid)) if (E.MAIL_TO or general.get("recipients")) else ""},
                     "presets": E.get_presets(aid), "schedules": E.get_schedules(aid),
                     "status": E.system_status(aid),
+                    "recent_errors": E.recent_errors(aid),
                     "uploads_mb": MAX_UPLOAD_MB})
 
 
 @app.put("/api/briefing/settings")
 def put_briefing():
-    return ok(settings=E.save_briefing_settings(request.get_json(silent=True) or {}, current_account_id()))
+    try:
+        return ok(settings=E.save_briefing_settings(request.get_json(silent=True) or {}, current_account_id()))
+    except ValueError as e:
+        return err(str(e))
 
 
 @app.put("/api/general")
@@ -219,8 +229,11 @@ def preset_save():
 
 @app.delete("/api/presets/<pid>")
 def preset_delete(pid):
-    E.delete_preset(pid, current_account_id())
-    return ok()
+    try:
+        E.delete_preset(pid, current_account_id())
+        return ok()
+    except ValueError as e:
+        return err(str(e))
 
 
 @app.post("/api/schedules")
@@ -265,8 +278,8 @@ def pc_off():
 @app.put("/api/pc/pause")
 def pc_pause():
     raw = request.get_json(silent=True) or {}
-    if "paused" not in raw:
-        return err("Missing paused value.")
+    if not isinstance(raw.get("paused"), bool):
+        return err("Paused must be a boolean.")
     return ok(paused=E.set_paused(raw["paused"]))
 
 
@@ -276,7 +289,7 @@ def pc_pause():
 def chat():
     raw = request.get_json(silent=True) or {}
     try:
-        rid = E.enqueue_chat(raw.get("message", ""), current_account_id())
+        rid = E.enqueue_chat(raw.get("message", ""), current_account_id(), raw.get("history"))
         return ok(id=rid)
     except (RuntimeError, ValueError) as e:
         return err(str(e), 409 if isinstance(e, RuntimeError) else 400)
@@ -285,7 +298,7 @@ def chat():
 def main():
     from waitress import serve
     E.init()
-    for fn in (E.worker_loop, E.scheduler_loop, E.idle_loop):
+    for fn in (E.worker_loop, E.scheduler_loop, E.idle_loop, E.health_loop):
         threading.Thread(target=fn, daemon=True).start()
     E.log("hub started on port", os.environ.get("PORT", "8088"))
     serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8088")), threads=8)

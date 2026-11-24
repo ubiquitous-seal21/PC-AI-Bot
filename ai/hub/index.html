@@ -178,6 +178,8 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
 const $ = s => document.querySelector(s);
 const TABS = [["briefing","Briefing"],["custom","Customize"],["ask","Ask"],["chat","Chatbot"],["sched","Scheduled"],["presets","Presets"],["hist","History"],["sys","System"]];
 const DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+let S=null;
+let accountGeneration=0;
 
 function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
 async function api(method, path, body, form){
@@ -192,14 +194,16 @@ async function api(method, path, body, form){
 }
 function el(tag, attrs={}, ...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs)){if(k==="on")for(const[ev,fn]of Object.entries(v))e.addEventListener(ev,fn);else if(k==="class")e.className=v;else e[k]=v}for(const k of kids)e.append(k);return e}
 
-function showLogin(){$("#app").classList.add("hide");$("#login").classList.remove("hide")}
+function showLogin(){clearAccountDrafts();$("#app").classList.add("hide");$("#login").classList.remove("hide")}
 async function start(){
-  try{S=await api("GET","/api/state");}catch(e){return}
+  const generation=accountGeneration;
+  try{S=await api("GET","/api/state");if(generation!==accountGeneration)return}
+  catch(e){showLogin();$("#loginErr").textContent=e.message==="login"?"":e.message;return}
   $("#login").classList.add("hide");$("#app").classList.remove("hide");
   fillAccounts();
   const nav=$("#tabs");nav.textContent="";
   TABS.forEach(([id,name],i)=>nav.append(el("button",{textContent:name,id:"tab-"+id,on:{click:()=>openTab(id)}})));
-  fillAll();openTab(location.hash.slice(1)||"briefing");
+  fillAll();renderStatus(S);openTab(location.hash.slice(1)||"briefing");
 }
 
 function fillAccounts(){
@@ -220,19 +224,41 @@ function fillAll(){fillCustom();fillPresets();fillSched()}
 let bPoll=null;
 let currentBriefing=null;
 async function loadLatestBriefing(){
-  const rs=await api("GET","/api/runs?kind=briefing");
-  const r=rs.find(x=>["ready","sent","running","queued"].includes(x.status))||null;
-  if(r)showBriefing(r.id);
-  else{currentBriefing=null;$("#bStatus").textContent="No briefing yet.";$("#bFrame").classList.add("hide");$("#buildBtn").disabled=false;$("#cancelBriefingBtn").classList.add("hide");$("#sendBtn").disabled=true}
+  const generation=accountGeneration;
+  try{
+    const rs=await api("GET","/api/runs?kind=briefing");
+    if(generation!==accountGeneration)return;
+    const r=rs.find(x=>["ready","sent","running","queued","sending"].includes(x.status))||null;
+    if(r)showBriefing(r.id);
+    else{currentBriefing=null;$("#bStatus").textContent="No briefing yet.";$("#bFrame").classList.add("hide");$("#buildBtn").disabled=false;$("#cancelBriefingBtn").classList.add("hide");$("#sendBtn").disabled=true}
+  }catch(e){
+    if(generation===accountGeneration){
+      currentBriefing=null;$("#bFrame").classList.add("hide");$("#buildBtn").disabled=false;
+      $("#cancelBriefingBtn").classList.add("hide");$("#sendBtn").disabled=true;
+      $("#bStatus").textContent="Could not load briefing: "+e.message;
+    }
+  }
 }
 async function showBriefing(id){
   clearTimeout(bPoll);
-  const r=await api("GET","/api/runs/"+id);currentBriefing=r;
+  const generation=accountGeneration;
+  let r;
+  try{r=await api("GET","/api/runs/"+id);if(generation!==accountGeneration)return}
+  catch(e){
+    if(generation===accountGeneration){
+      currentBriefing=null;$("#bFrame").classList.add("hide");$("#buildBtn").disabled=false;
+      $("#cancelBriefingBtn").classList.add("hide");$("#sendBtn").disabled=true;
+      $("#bStatus").textContent="Could not load briefing: "+e.message;
+    }
+    return;
+  }
+  currentBriefing=r;
   const f=$("#bFrame");
-  const active=["queued","running"].includes(r.status);
+  const active=["queued","running","sending"].includes(r.status);
+  const cancellable=["queued","running"].includes(r.status);
   $("#buildBtn").disabled=active;
-  $("#cancelBriefingBtn").classList.toggle("hide",!active);
-  $("#sendBtn").disabled=!["ready","sent"].includes(r.status);
+  $("#cancelBriefingBtn").classList.toggle("hide",!cancellable);
+  $("#sendBtn").disabled=r.status!=="ready";
   if(["ready","sent"].includes(r.status)){f.classList.remove("hide");f.srcdoc=r.output;$("#bStatus").textContent=r.title+" · "+(r.detail||"")+(r.emailed?" · emailed":"")}
   else if(r.status==="error"){f.classList.add("hide");$("#bStatus").textContent="Failed: "+r.detail}
   else if(r.status==="cancelled"){f.classList.add("hide");$("#bStatus").textContent=r.title+" · Cancelled"}
@@ -278,10 +304,21 @@ $("#saveCustom").onclick=async()=>{
 $("#testMail").onclick=async()=>{try{await api("PUT","/api/general",{recipients:$("#recipients").value});await api("POST","/api/email/test",{});toast("Test email sent")}catch(e){toast(e.message)}};
 
 // ----- ask tab -----
+let askPoll=null;
 function fillPresets(){
   for(const sel of [$("#preset"),$("#sPreset")]){const keep=sel.value;sel.textContent="";S.presets.forEach(p=>sel.append(el("option",{value:p.id,textContent:p.name})));if(keep)sel.value=keep}
   const list=$("#presetList");list.textContent="";
-  S.presets.forEach(p=>list.append(el("div",{class:"card"},el("b",{textContent:p.name}),el("div",{class:"mute",textContent:p.instruction.slice(0,160)+(p.instruction.length>160?"...":"")}),el("p",{},el("button",{class:"btn alt",textContent:"Edit",on:{click:()=>editPreset(p)}})," ",el("button",{class:"btn del",textContent:"Delete",on:{click:async()=>{if(confirm("Delete this preset?")){await api("DELETE","/api/presets/"+p.id);S=await api("GET","/api/state");fillAll()}}}})))));
+  S.presets.forEach(p=>{
+    const edit=el("button",{class:"btn alt",textContent:"Edit",on:{click:()=>editPreset(p)}});
+    const remove=el("button",{class:"btn del",textContent:"Delete",on:{click:async()=>{
+      if(!confirm("Delete this preset?"))return;
+      try{await api("DELETE","/api/presets/"+p.id);S=await api("GET","/api/state");fillAll()}
+      catch(e){toast(e.message)}
+    }}});
+    list.append(el("div",{class:"card"},el("b",{textContent:p.name}),
+      el("div",{class:"mute",textContent:p.instruction.slice(0,160)+(p.instruction.length>160?"...":"")}),
+      el("p",{},edit," ",remove)));
+  });
 }
 let editingPreset=null;
 function editPreset(p){editingPreset=p?p.id:null;$("#pTitle").textContent=p?"Edit preset":"New preset";$("#pName").value=p?p.name:"";$("#pInstr").value=p?p.instruction:"";$("#pVision").checked=p?p.vision:false;$("#pName").focus()}
@@ -294,52 +331,105 @@ $("#askBtn").onclick=async()=>{
   try{const j=await api("POST","/api/task",undefined,fd);pollAsk(j.id)}catch(e){toast(e.message)}
 };
 async function pollAsk(id){
-  clearTimeout(askPoll);const r=await api("GET","/api/runs/"+id);
-  if(r.status==="done"){$("#askStatus").textContent=r.detail||"Done";$("#askOut").textContent=r.output;$("#askOut").classList.remove("hide");$("#copyOut").classList.remove("hide");return}
-  if(r.status==="error"){$("#askStatus").textContent="Failed: "+r.detail;return}
-  $("#askStatus").textContent=(r.detail||"Queued")+"...";askPoll=setTimeout(()=>pollAsk(id),2500);
+  clearTimeout(askPoll);
+  const generation=accountGeneration;
+  try{
+    const r=await api("GET","/api/runs/"+id);
+    if(generation!==accountGeneration)return;
+    if(r.status==="done"){$("#askStatus").textContent=r.detail||"Done";$("#askOut").textContent=r.output;$("#askOut").classList.remove("hide");$("#copyOut").classList.remove("hide");return}
+    if(r.status==="error"){$("#askStatus").textContent="Failed: "+r.detail;return}
+    $("#askStatus").textContent=(r.detail||"Queued")+"...";askPoll=setTimeout(()=>pollAsk(id),2500);
+  }catch(e){if(generation===accountGeneration)$("#askStatus").textContent="Failed: "+e.message}
 }
-$("#copyOut").onclick=()=>navigator.clipboard.writeText($("#askOut").textContent).then(()=>toast("Copied"));
+$("#copyOut").onclick=()=>navigator.clipboard.writeText($("#askOut").textContent).then(()=>toast("Copied")).catch(e=>toast(e.message));
 
 // ----- direct chatbot (exclusive of background work) -----
 let chatPoll = null;
 let chatRunId = null;
+let chatGeneration = 0;
 function chatMessage(role,text){
   $("#chatLog").append(el("div",{class:"chatMessage "+role,textContent:text}));
   $("#chatLog").scrollTop=$("#chatLog").scrollHeight;
 }
 async function pollChat(){
   if(!chatRunId)return;
+  const runId=chatRunId;
   clearTimeout(chatPoll);
-  const r=await api("GET","/api/runs/"+chatRunId);
-  if(r.status==="done"){
-    chatMessage("ai",r.output||"(empty)");
-    $("#chatStatus").textContent="Done";
+  try{
+    const r=await api("GET","/api/runs/"+runId);
+    if(chatRunId!==runId)return;
+    if(r.status==="done"){
+      chatMessage("ai",r.output||"(empty)");
+      $("#chatStatus").textContent="Done";
+      $("#chatSend").disabled=false;
+      $("#chatClear").disabled=false;
+      chatRunId=null;
+      return;
+    }
+    if(r.status==="error"){
+      $("#chatStatus").textContent="Failed: "+r.detail;
+      $("#chatSend").disabled=false;
+      $("#chatClear").disabled=false;
+      chatRunId=null;
+      return;
+    }
+    $("#chatStatus").textContent=(r.detail||"Working")+"...";
+    chatPoll=setTimeout(pollChat,2500);
+  }catch(e){
+    if(chatRunId!==runId)return;
+    $("#chatStatus").textContent="Failed: "+e.message;
     $("#chatSend").disabled=false;
+    $("#chatClear").disabled=false;
     chatRunId=null;
-    return;
   }
-  if(r.status==="error"){
-    $("#chatStatus").textContent="Failed: "+r.detail;
-    $("#chatSend").disabled=false;
-    chatRunId=null;
-    return;
-  }
-  $("#chatStatus").textContent=(r.detail||"Working")+"...";
-  chatPoll=setTimeout(pollChat,2500);
 }
 $("#chatSend").onclick=async()=>{
   const message=$("#chatMessage").value.trim();
   if(!message)return;
+  const generation=chatGeneration;
+  $("#chatSend").disabled=true;
   try{
-    const j=await api("POST","/api/chat",{message});
+    const history=[...$("#chatLog").children].map(m=>({
+      role:m.classList.contains("user")?"user":"assistant",content:m.textContent
+    }));
+    const j=await api("POST","/api/chat",{message,history});
+    if(generation!==chatGeneration)return;
     chatMessage("user",message);$("#chatMessage").value="";
-    chatRunId=j.id;$("#chatSend").disabled=true;
+    chatRunId=j.id;
+    $("#chatClear").disabled=true;
     $("#chatStatus").textContent="Queued...";
     pollChat();
-  }catch(e){toast(e.message)}
+  }catch(e){if(generation===chatGeneration){$("#chatSend").disabled=false;toast(e.message)}}
 };
-$("#chatClear").onclick=()=>{$("#chatLog").textContent="";$("#chatStatus").textContent=""};
+function clearChat(){
+  chatGeneration++;
+  clearTimeout(chatPoll);
+  chatRunId=null;
+  $("#chatLog").textContent="";
+  $("#chatStatus").textContent="";
+  $("#chatMessage").value="";
+  $("#chatSend").disabled=false;
+  $("#chatClear").disabled=false;
+}
+$("#chatClear").onclick=clearChat;
+function clearAsk(){
+  clearTimeout(askPoll);
+  $("#note").value="";$("#urls").value="";$("#files").value="";$("#emailIt").checked=false;
+  $("#askStatus").textContent="";$("#askOut").textContent="";
+  $("#askOut").classList.add("hide");$("#copyOut").classList.add("hide");
+}
+function clearScheduleDraft(){
+  $("#sName").value="";$("#sNote").value="";$("#sUrls").value="";$("#sTime").value="08:00";
+  $("#sDays").querySelectorAll("input").forEach(i=>i.checked=true);
+}
+function clearAccountDrafts(){
+  accountGeneration++;
+  clearChat();clearAsk();clearScheduleDraft();editPreset(null);
+  clearTimeout(bPoll);currentBriefing=null;
+  $("#bFrame").classList.add("hide");$("#bStatus").textContent="";
+  $("#buildBtn").disabled=false;$("#cancelBriefingBtn").classList.add("hide");$("#sendBtn").disabled=true;
+  $("#histBody").textContent="";$("#histView").textContent="";$("#sysInfo").textContent="";
+}
 
 // ----- scheduled tab -----
 function fillSched(){
@@ -347,7 +437,7 @@ function fillSched(){
   const list=$("#schedList");list.textContent="";
   if(!S.schedules.length)list.append(el("p",{class:"mute",textContent:"Nothing scheduled yet."}));
   S.schedules.forEach(s=>{const p=S.presets.find(x=>x.id===s.preset_id);
-    list.append(el("div",{class:"card"},el("b",{textContent:s.name}),el("div",{class:"mute",textContent:(p?p.name:"(missing preset)")+" · "+s.days.map(d=>DAYS[d]).join(" ")+" at "+s.time+" · emailed"}),el("p",{},el("button",{class:"btn del",textContent:"Remove",on:{click:async()=>{await api("DELETE","/api/schedules/"+s.id);S=await api("GET","/api/state");fillSched()}}}))))});
+    list.append(el("div",{class:"card"},el("b",{textContent:s.name}),el("div",{class:"mute",textContent:(p?p.name:"(missing preset)")+" · "+s.days.map(d=>DAYS[d]).join(" ")+" at "+s.time+" · emailed"}),el("p",{},el("button",{class:"btn del",textContent:"Remove",on:{click:async()=>{try{await api("DELETE","/api/schedules/"+s.id);S=await api("GET","/api/state");fillSched()}catch(e){toast(e.message)}}}}))))});
 }
 $("#sAdd").onclick=async()=>{
   try{await api("POST","/api/schedules",{name:$("#sName").value,preset_id:$("#sPreset").value,time:$("#sTime").value,days:[...$("#sDays").querySelectorAll("input:checked")].map(i=>+i.value),note:$("#sNote").value,urls:$("#sUrls").value.split("\n")});S=await api("GET","/api/state");fillSched();$("#sName").value="";toast("Scheduled")}catch(e){toast(e.message)}
@@ -355,38 +445,78 @@ $("#sAdd").onclick=async()=>{
 
 // ----- history + system -----
 async function loadHist(){
-  const rs=await api("GET","/api/runs");const tb=$("#histBody");tb.textContent="";
-  rs.forEach(r=>tb.append(el("tr",{},el("td",{textContent:new Date(r.created*1000).toLocaleString()}),el("td",{textContent:r.title}),el("td",{textContent:r.status+(r.emailed?" · emailed":"")}),el("td",{},el("button",{class:"btn alt",textContent:"Open",on:{click:()=>openRun(r)}})))));
+  const generation=accountGeneration;
+  const tb=$("#histBody");tb.textContent="";$("#histView").textContent="";
+  try{
+    const rs=await api("GET","/api/runs");
+    if(generation!==accountGeneration)return;
+    rs.forEach(r=>tb.append(el("tr",{},el("td",{textContent:new Date(r.created*1000).toLocaleString()}),el("td",{textContent:r.title}),el("td",{textContent:r.status+(r.emailed?" · emailed":"")}),el("td",{},el("button",{class:"btn alt",textContent:"Open",on:{click:()=>openRun(r)}})))));
+  }catch(e){if(generation===accountGeneration)tb.append(el("tr",{},el("td",{colSpan:4,class:"bad",textContent:"Could not load history: "+e.message})));}
 }
 async function openRun(r){
-  const full=await api("GET","/api/runs/"+r.id);const v=$("#histView");v.textContent="";
-  if(full.kind==="briefing"&&full.output){v.append(el("iframe",{sandbox:"",srcdoc:full.output}))}
-  else v.append(el("pre",{class:"out",textContent:full.output||full.detail||"(empty)"}));
-  v.scrollIntoView();
+  const generation=accountGeneration;
+  const v=$("#histView");v.textContent="";
+  try{
+    const full=await api("GET","/api/runs/"+r.id);
+    if(generation!==accountGeneration)return;
+    if(full.kind==="briefing"&&full.output){v.append(el("iframe",{sandbox:"",srcdoc:full.output}))}
+    else v.append(el("pre",{class:"out",textContent:full.output||full.detail||"(empty)"}));
+    v.scrollIntoView();
+  }catch(e){if(generation===accountGeneration)v.append(el("p",{class:"bad",textContent:"Could not load run: "+e.message}))}
 }
 async function loadSys(){
-  S=await api("GET","/api/state");const s=S.status,box=$("#sysInfo");box.textContent="";
+  const generation=accountGeneration;
+  const box=$("#sysInfo");box.textContent="";
+  try{S=await api("GET","/api/state")}
+  catch(e){if(generation===accountGeneration)box.append(el("p",{class:"bad",textContent:"Could not load system status: "+e.message}));return}
+  if(generation!==accountGeneration)return;
+  const s=S.status;
   const line=(k,v,good)=>box.append(el("div",{class:"card"},el("b",{textContent:k+": "}),el("span",{class:good===undefined?"":(good?"ok":"bad"),textContent:v})));
-  line("PC",s.pc_on?"on":"off or unreachable",s.pc_on);line("Ollama",s.pc_up?"reachable":(s.pc_on?"PC is on, but Ollama is unreachable":"unavailable"),s.pc_up);line("Email",s.email_ready?"configured":"not configured (see .env)",s.email_ready);
+  line("PC",!s.health_checked?"checking":s.pc_on?"on":"off or unreachable",s.health_checked?s.pc_on:undefined);
+  line("Ollama",!s.health_checked?"checking":s.pc_up?"reachable":(s.pc_on?"PC is on, but Ollama is unreachable":"unavailable"),s.health_checked?s.pc_up:undefined);
+  line("Email",s.email_ready?"configured":"not configured (see .env)",s.email_ready);
   line("Recipients",s.recipients.join(", ")||"none set",s.recipients.length>0);line("FreshRSS",s.freshrss_ready?"configured":"not configured (see .env)",s.freshrss_ready);
   line("Models",s.text_model+" (text), "+s.vision_model+" (vision)");line("PC address",s.pc_ip);
-  line("Desktop safety",s.active_sessions?"active session detected: no automatic shutdown":"no active session detected",!s.active_sessions);
+  const sessionText=!s.health_checked?"checking":!s.session_check_ok?"could not verify; automatic shutdown is blocked":s.active_sessions?"active session detected: no automatic shutdown":"no active session detected";
+  line("Desktop safety",sessionText,s.health_checked?s.session_check_ok&&!s.active_sessions:undefined);
   line("AI scheduler",s.paused?"paused":"running",!s.paused);
 }
 $("#wakeBtn").onclick=async()=>{try{const s=await api("POST","/api/pc/wake",{});toast(s.ollama_up?"PC and Ollama are already ready":s.pc_on?"PC is already on, but Ollama is unreachable":"Magic packet sent")}catch(e){toast(e.message)}};
 $("#offBtn").onclick=async()=>{if(confirm("Power the PC off now?")){try{await api("POST","/api/pc/off",{});toast("Power-off sent")}catch(e){toast(e.message)}}};
 $("#pauseBtn").onclick=async()=>{try{const pa=!(S&&S.status&&S.status.paused);const j=await api("PUT","/api/pc/pause",{paused:pa});S.status.paused=j.paused;$("#pauseBtn").textContent=j.paused?"Resume AI":"Pause AI";toast(j.paused?"AI paused":"AI resumed")}catch(e){toast(e.message)}};
-setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":st.pc_on?"on · Ollama offline":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":st.pc_on?"PC on · Ollama unreachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
+function renderStatus(s){
+  const st=s.status;
+  const pcLabel=!st.health_checked?"checking":st.pc_up?"on":st.pc_on?"on · Ollama offline":"off";
+  $("#pcState").textContent="PC: "+pcLabel;$("#pcState").className="pill "+(st.pc_up?"ok":"");
+  const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");
+  $("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");
+  $("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";
+  const sessionLabel=!st.health_checked?"checking":!st.session_check_ok?"session status unknown":st.active_sessions?"desktop/session active":"no active desktop session";
+  $("#widgetActivity").textContent=st.queued+" queued · "+st.busy+" active jobs · "+sessionLabel;
+  const pcUsage=!st.health_checked?"Checking PC/Ollama":st.pc_up?"Ollama reachable":st.pc_on?"PC on · Ollama unreachable":"PC/Ollama offline";
+  $("#widgetUsage").textContent=pcUsage+" · "+st.text_model+" · "+st.vision_model;
+  $("#widgetErrors").textContent=s.recent_errors.length?s.recent_errors.map(r=>r.title+": "+(r.detail||"Unknown error")).join("\n"):"None";
+  $("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\n"+st.queued+" queued / "+st.busy+" active";
+}
+async function refreshStatus(){
+  if($("#app").classList.contains("hide"))return;
+  const generation=accountGeneration;
+  try{
+    const s=await api("GET","/api/state");if(generation!==accountGeneration)return;S=s;renderStatus(s);
+  }catch(e){if(generation===accountGeneration)$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  Status refresh failed: "+e.message}
+}
+refreshStatus();
+setInterval(refreshStatus,15000);
 
 $("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{username:$("#accountName").value,password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};
 $("#pw").addEventListener("keydown",e=>{if(e.key==="Enter")$("#loginBtn").click()});
-$("#logout").onclick=async()=>{await api("POST","/api/logout",{});showLogin()};
+$("#logout").onclick=async()=>{try{await api("POST","/api/logout",{});clearAccountDrafts();showLogin()}catch(e){toast(e.message)}};
 $("#accountSelect").onchange=async()=>{
   const password=prompt("Password for "+$("#accountSelect").selectedOptions[0].textContent+":");
   if(password===null){fillAccounts();return}
   try{
     await api("POST","/api/accounts/"+$("#accountSelect").value+"/switch", {password});
-    S=await api("GET","/api/state");fillAccounts();fillAll();toast("Switched account");
+    S=await api("GET","/api/state");fillAccounts();fillAll();clearAccountDrafts();renderStatus(S);openTab(location.hash.slice(1));toast("Switched account");
   }catch(e){toast(e.message)}
 };
 $("#addAccount").onclick=async()=>{
