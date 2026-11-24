@@ -371,7 +371,6 @@ TZ=America/New_York
 HUB_PASSWORD=use-a-long-random-password
 HUB_ACCOUNT_NAME=admin
 HUB_COOKIE_SECURE=false
-HUB_TLS_TERMINATED=false
 PORT=8088
 MAX_UPLOAD_MB=40
 
@@ -512,6 +511,10 @@ Verify:
 The dashboard distinguishes the PC being reachable from Ollama being ready. If
 the PC is on but Ollama is unavailable, check the `ollama` service on the PC
 instead of repeatedly sending Wake-on-LAN packets.
+Health and desktop-session checks refresh in the background so a slow or
+unreachable PC does not block dashboard requests. Chat retains recent messages
+as context in the open page; clearing, reloading, logging out, or switching
+accounts clears that context.
 
 Keep automatic shutdown disabled:
 
@@ -663,7 +666,6 @@ Before exposing HTTPS:
 
 ```dotenv
 HUB_COOKIE_SECURE=true
-HUB_TLS_TERMINATED=true
 ```
 
 5. Restart the container.

@@ -72,7 +72,7 @@ os.makedirs(DATA, exist_ok=True)
 _db = sqlite3.connect(os.path.join(DATA, "hub.db"), check_same_thread=False)
 _db.row_factory = sqlite3.Row
 _lock = threading.RLock()
-_cfg_lock = threading.Lock()
+_cfg_lock = threading.RLock()
 _db.executescript("""
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS accounts(
@@ -208,6 +208,16 @@ def list_runs(kind=None, limit=60, account_id=None):
     return sql(f"SELECT {cols} FROM runs ORDER BY id DESC LIMIT ?", (limit,))
 
 
+def recent_errors(account_id=None, limit=5):
+    cols = "id,kind,title,created,detail"
+    if account_id is None:
+        return sql(f"SELECT {cols} FROM runs WHERE status='error' OR detail LIKE 'Email failed:%' "
+                   "ORDER BY id DESC LIMIT ?", (limit,))
+    return sql(f"SELECT {cols} FROM runs WHERE account_id=? "
+               "AND (status='error' OR detail LIKE 'Email failed:%') ORDER BY id DESC LIMIT ?",
+               (account_id, limit))
+
+
 # ---------- settings, presets, schedules ----------
 EMAIL_RE = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$")
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -226,7 +236,7 @@ DEFAULT_BRIEFING = {
 def num(v, lo, hi, default):
     try:
         v = int(float(v))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return max(lo, min(hi, v))
 
@@ -238,18 +248,24 @@ def clean_time(v, default):
 
 def clean_briefing(raw):
     d = DEFAULT_BRIEFING
+    focus_input = raw.get("focuses", d["focuses"])
+    if focus_input is not None and (not isinstance(focus_input, list)
+                                    or any(not isinstance(f, dict) for f in focus_input)):
+        raise ValueError("Focus areas must be a list of objects.")
+    enabled = raw.get("enabled", d["enabled"])
+    include_read = raw.get("include_read", d["include_read"])
     s = {
-        "enabled": bool(raw.get("enabled", d["enabled"])),
+        "enabled": enabled if isinstance(enabled, bool) else d["enabled"],
         "deliver_time": clean_time(raw.get("deliver_time"), d["deliver_time"]),
         "prep_minutes": num(raw.get("prep_minutes"), 10, 240, d["prep_minutes"]),
         "lookback_hours": num(raw.get("lookback_hours"), 1, 72, d["lookback_hours"]),
         "max_items": num(raw.get("max_items"), 20, 500, d["max_items"]),
         "top_n": num(raw.get("top_n"), 1, 30, d["top_n"]),
         "min_importance": num(raw.get("min_importance"), 0, 10, d["min_importance"]),
-        "include_read": bool(raw.get("include_read", d["include_read"])),
+        "include_read": include_read if isinstance(include_read, bool) else d["include_read"],
     }
     focuses, seen = [], set()
-    for f in (raw.get("focuses", d["focuses"]) or [])[:12]:
+    for f in (focus_input or [])[:12]:
         name = str(f.get("name", "")).strip()[:60]
         if name and name.lower() not in seen:
             seen.add(name.lower())
@@ -274,6 +290,10 @@ def save_briefing_settings(raw, account_id=None):
 
 
 def parse_emails(text):
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        raise ValueError("Recipients must be text.")
     parts = [p for p in re.split(r"[,\s;]+", text or "") if p]
     bad = [p for p in parts if not EMAIL_RE.match(p)]
     if bad:
@@ -342,10 +362,13 @@ def save_preset(raw, account_id=None):
     instruction = str(raw.get("instruction", "")).strip()[:4000]
     if not name or not instruction:
         raise ValueError("A preset needs a name and instructions.")
+    vision = raw.get("vision", False)
+    if not isinstance(vision, bool):
+        raise ValueError("Vision must be a boolean.")
     with _cfg_lock:
         presets = get_presets(account_id)
         pid = str(raw.get("id") or uuid.uuid4().hex[:8])
-        item = {"id": pid, "name": name, "instruction": instruction, "vision": bool(raw.get("vision"))}
+        item = {"id": pid, "name": name, "instruction": instruction, "vision": vision}
         for i, p in enumerate(presets):
             if p["id"] == pid:
                 presets[i] = item
@@ -361,6 +384,8 @@ def save_preset(raw, account_id=None):
 
 def delete_preset(pid, account_id=None):
     with _cfg_lock:
+        if any(s.get("preset_id") == pid for s in get_schedules(account_id)):
+            raise ValueError("This preset is used by a scheduled task. Remove that schedule first.")
         presets = [p for p in get_presets(account_id) if p["id"] != pid]
         if account_id is None:
             kv_set("presets", presets)
@@ -374,18 +399,34 @@ def get_schedules(account_id=None):
 
 
 def save_schedule(raw, account_id=None):
-    if not any(p["id"] == raw.get("preset_id") for p in get_presets(account_id)):
-        raise ValueError("Pick a preset for this scheduled task.")
-    days = sorted({d for d in (raw.get("days") or []) if isinstance(d, int) and 0 <= d <= 6})
-    item = {
-        "id": str(raw.get("id") or uuid.uuid4().hex[:8]),
-        "name": str(raw.get("name", "")).strip()[:80] or "Scheduled task",
-        "preset_id": raw["preset_id"], "note": str(raw.get("note", ""))[:4000],
-        "urls": [u.strip() for u in (raw.get("urls") or []) if str(u).strip()][:5],
-        "days": days or list(range(7)), "time": clean_time(raw.get("time"), "08:00"),
-        "enabled": bool(raw.get("enabled", True)), "last_run": "",
-    }
     with _cfg_lock:
+        if not any(p["id"] == raw.get("preset_id") for p in get_presets(account_id)):
+            raise ValueError("Pick a preset for this scheduled task.")
+        raw_days = raw.get("days", list(range(7)))
+        if not isinstance(raw_days, list):
+            raise ValueError("Choose one or more days for this scheduled task.")
+        days = sorted({d for d in raw_days if type(d) is int and 0 <= d <= 6})
+        if not days:
+            raise ValueError("Choose one or more days for this scheduled task.")
+        task_time = str(raw.get("time", "08:00") or "")
+        if not TIME_RE.fullmatch(task_time):
+            raise ValueError("Choose a valid time for this scheduled task.")
+        raw_urls = raw.get("urls") or []
+        if not isinstance(raw_urls, list):
+            raise ValueError("Scheduled task links must be a list.")
+        if any(not isinstance(url, str) for url in raw_urls):
+            raise ValueError("Scheduled task links must be text.")
+        enabled = raw.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError("Enabled must be a boolean.")
+        item = {
+            "id": str(raw.get("id") or uuid.uuid4().hex[:8]),
+            "name": str(raw.get("name", "")).strip()[:80] or "Scheduled task",
+            "preset_id": raw["preset_id"], "note": str(raw.get("note", ""))[:4000],
+            "urls": [u.strip() for u in raw_urls if u.strip()][:5],
+            "days": days, "time": task_time,
+            "enabled": enabled, "last_run": "",
+        }
         items = get_schedules(account_id)
         for i, s in enumerate(items):
             if s["id"] == item["id"]:
@@ -438,6 +479,18 @@ def run(cmd, timeout):
 state = {"last": time.time(), "busy": 0, "worker_busy": False,
          "paused": False, "we_woke": False}
 jobs = queue.Queue()
+_job_lock = threading.Lock()
+_job_ready = threading.Event()
+_power_lock = threading.Lock()
+_health_lock = threading.Lock()
+_health = {"pc_up": None, "pc_on": None, "active_sessions": None,
+           "session_check_ok": False, "checked": None}
+
+
+def put_job(job):
+    with _job_lock:
+        jobs.put(job)
+        _job_ready.set()
 
 
 def ollama_up():
@@ -553,19 +606,20 @@ def ensure_pc(timeout=300):
 
 @contextlib.contextmanager
 def pc_job(prog=None):
-    with _lock:
-        state["busy"] += 1
-    try:
-        if prog:
-            prog("Waking the PC" if not ollama_up() else "Thinking")
-        ensure_pc()
-        if prog:
-            prog("Thinking")
-        yield
-    finally:
+    with _power_lock:
         with _lock:
-            state["busy"] -= 1
-            state["last"] = time.time()
+            state["busy"] += 1
+        try:
+            if prog:
+                prog("Waking the PC" if not ollama_up() else "Thinking")
+            ensure_pc()
+            if prog:
+                prog("Thinking")
+            yield
+        finally:
+            with _lock:
+                state["busy"] -= 1
+                state["last"] = time.time()
 
 
 def power_off_pc():
@@ -595,7 +649,7 @@ def pc_session_check_shell(poweroff=False):
     remote_command = shlex.join(shlex.split(PC_OFF_CMD)) if poweroff else ""
     return (
         "session_output=$(loginctl list-sessions --no-legend 2>/dev/null) || exit 2; "
-        "active=0; "
+        "active=0; user_sessions=0; "
         "for sid in $(printf '%s\\n' \"$session_output\" | awk '{print $1}'); do "
         "[ -n \"$sid\" ] || continue; "
         "props=$(loginctl show-session \"$sid\" --no-pager "
@@ -605,10 +659,11 @@ def pc_session_check_shell(poweroff=False):
         "locked=$(printf '%s\\n' \"$props\" | sed -n 's/^LockedHint=//p' | head -n1); "
         "stype=$(printf '%s\\n' \"$props\" | sed -n 's/^Type=//p' | head -n1); "
         "class=$(printf '%s\\n' \"$props\" | sed -n 's/^Class=//p' | head -n1); "
+        "if [ \"$stype\" != greeter ] && [ \"$class\" != greeter ]; then "
+        "user_sessions=$((user_sessions+1)); "
         "if [ \"$locked\" != yes ] "
-        "&& [ \"$stype\" != greeter ] && [ \"$class\" != greeter ]; then "
-        "if printf '%s\\n' \"$props\" | grep -Eq '^(Active=yes|State=active|IdleHint=no)$'; then "
-        "active=1; fi; fi; "
+        "&& printf '%s\\n' \"$props\" | grep -Eq '^(Active=yes|State=active|IdleHint=no)$'; then "
+        "active=$((active+1)); fi; fi; "
         "done; "
         "locked_desktop=0; "
         "for exe in /proc/[0-9]*/exe; do "
@@ -616,7 +671,9 @@ def pc_session_check_shell(poweroff=False):
         "case \"${name##*/}\" in "
         "kscreenlocker_greet|kscreenlocker_g|gnome-screensaver-dialog|"
         "i3lock|swaylock|hyprlock) locked_desktop=1; break ;; esac; done; "
-        "if [ \"$locked_desktop\" -eq 1 ]; then echo 'LockedDesktop=yes'; active=0; fi; "
+        "if [ \"$locked_desktop\" -eq 1 ] && [ \"$active\" -eq 1 ] "
+        "&& [ \"$user_sessions\" -eq 1 ]; then "
+        "echo 'LockedDesktop=yes'; active=0; fi; "
         "if [ \"$active\" -eq 1 ]; then echo 'SessionActive=yes'; exit 3; fi"
         + (f"; exec {remote_command}; exit 0" if poweroff and remote_command else "; exit 0")
     )
@@ -650,8 +707,13 @@ def power_off_pc_if_idle():
 
 def pc_has_active_sessions():
     """Fail closed: if session state cannot be verified, do not auto-power-off."""
+    return pc_session_status() is not False
+
+
+def pc_session_status():
+    """Return True for active, False for inactive, or None when state is unknown."""
     if not PC_USER:
-        return True
+        return None
     cmd = ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
            "-o", "StrictHostKeyChecking=accept-new",
            "-o", f"UserKnownHostsFile={DATA}/known_hosts",
@@ -664,7 +726,7 @@ def pc_has_active_sessions():
             elif p.returncode == 3:
                 return True
             log("active-session check failed:", p.stderr.strip()[:200])
-            return True
+            return None
         if "SessionActive=yes" in p.stdout:
             return True
         if "LockedDesktop=yes" in p.stdout:
@@ -672,32 +734,58 @@ def pc_has_active_sessions():
         return False
     except Exception as e:
         log("active-session check failed:", repr(e))
-        return True
+        return None
+
+
+def power_off_if_idle():
+    if IDLE_OFF_MIN <= 0:
+        return False
+    with _power_lock:
+        with _job_lock:
+            with _lock:
+                idle = (state["busy"] == 0 and not state["worker_busy"] and jobs.empty()
+                        and time.time() - state["last"] > IDLE_OFF_MIN * 60)
+                woke = state["we_woke"]
+        if idle and woke and power_off_pc_if_idle():
+            with _lock:
+                state["we_woke"] = False
+            return True
+    return False
 
 
 def idle_loop():
     while True:
         time.sleep(30)
-        if IDLE_OFF_MIN <= 0:
-            continue
-        with _lock:
-            idle = (state["busy"] == 0 and not state["worker_busy"]
-                    and time.time() - state["last"] > IDLE_OFF_MIN * 60)
-            woke = state["we_woke"]
-        if idle and woke:
-            if power_off_pc_if_idle():
-                with _lock:
-                    state["we_woke"] = False
+        power_off_if_idle()
+
+
+def refresh_health():
+    ollama_ready = ollama_up()
+    pc_on = ollama_ready or pc_host_up()
+    session_status = pc_session_status()
+    with _health_lock:
+        _health.update(pc_up=ollama_ready, pc_on=pc_on,
+                       active_sessions=session_status is True,
+                       session_check_ok=session_status is not None, checked=time.time())
+
+
+def health_loop():
+    while True:
+        try:
+            refresh_health()
+        except Exception as e:
+            log("health check failed:", repr(e))
+        time.sleep(15)
 
 
 # ---------- Ollama ----------
-def chat(prompt, model, images=None, schema=None, num_ctx=8192):
+def chat(prompt, model, images=None, schema=None, num_ctx=8192, messages=None):
     if model.startswith("qwen3") and "vl" not in model and schema:
         prompt = "/no_think\n" + prompt
     msg = {"role": "user", "content": prompt}
     if images:
         msg["images"] = images
-    payload = {"model": model, "messages": [msg], "stream": False,
+    payload = {"model": model, "messages": messages or [msg], "stream": False,
                "options": {"num_ctx": num_ctx, "temperature": 0.3}}
     if schema:
         payload["format"] = schema
@@ -942,13 +1030,13 @@ def run_task(rid, preset, note, urls, files, email):
         update_run(rid, status="error", detail=str(e)[:500])
 
 
-def run_chat(rid, note):
+def run_chat(rid, messages):
     def prog(t):
         update_run(rid, status="running", detail=t)
     try:
         prog("Waiting for the PC")
         with pc_job(prog):
-            out = chat(note.strip(), TEXT_MODEL, num_ctx=16384)
+            out = chat("", TEXT_MODEL, num_ctx=16384, messages=messages)
         update_run(rid, status="done", detail="", output=out)
     except Exception as e:
         log("chat failed:", repr(e))
@@ -961,19 +1049,34 @@ def enqueue_task(preset_id, note, urls, files, email, title=None, account_id=Non
         raise ValueError("Unknown preset")
     first_line = note.strip().split("\n")[0][:50] if note.strip() else ""
     rid = new_run("task", title or (preset["name"] + (": " + first_line if first_line else "")), account_id=account_id)
-    jobs.put(("task", rid, preset, note, urls, files, email))
+    put_job(("task", rid, preset, note, urls, files, email))
     return rid
 
 
-def enqueue_chat(note, account_id=None):
+def enqueue_chat(note, account_id=None, history=None):
     note = str(note or "").strip()[:4000]
     if not note:
         raise ValueError("Enter a message.")
-    with _lock:
-        if state["worker_busy"] or state["paused"] or jobs.qsize():
-            raise RuntimeError("The chatbot is unavailable while background work is active or paused.")
-    rid = new_run("chat", "Chat", account_id=account_id)
-    jobs.put(("chat", rid, note))
+    if history is None:
+        history = []
+    if not isinstance(history, list):
+        raise ValueError("Chat history must be a list of messages.")
+    messages = []
+    for message in history[-10:]:
+        if not isinstance(message, dict) or message.get("role") not in ("user", "assistant"):
+            raise ValueError("Chat history contains an invalid message.")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ValueError("Chat history contains an invalid message.")
+        messages.append({"role": message["role"], "content": content[:2000]})
+    messages.append({"role": "user", "content": note})
+    with _job_lock:
+        with _lock:
+            if state["worker_busy"] or state["paused"] or jobs.qsize():
+                raise RuntimeError("The chatbot is unavailable while background work is active or paused.")
+        rid = new_run("chat", "Chat", account_id=account_id)
+        jobs.put(("chat", rid, messages))
+        _job_ready.set()
     return rid
 
 
@@ -1199,7 +1302,7 @@ def send_briefing(rid):
 
 def enqueue_briefing(auto=0, account_id=None):
     rid = new_run("briefing", "Briefing " + datetime.date.today().strftime("%a %d %b"), auto=auto, account_id=account_id)
-    jobs.put(("build", rid))
+    put_job(("build", rid))
     return rid
 
 
@@ -1256,8 +1359,17 @@ def tick(now=None):
             build_key = account_key(aid, "last_build")
             attempt_key = account_key(aid, "last_build_attempt")
             if start <= now <= deliver + grace and kv_get(build_key) != today and kv_get(attempt_key) != today:
-                kv_set(attempt_key, today)
-                enqueue_briefing(auto=1, account_id=aid)
+                day_start = datetime.datetime.combine(now.date(), datetime.time.min).timestamp()
+                next_day = datetime.datetime.combine(now.date() + datetime.timedelta(days=1),
+                                                     datetime.time.min).timestamp()
+                existing = sql(
+                    "SELECT id FROM runs WHERE kind='briefing' AND account_id=? AND auto=1 "
+                    "AND created>=? AND created<? LIMIT 1", (aid, day_start, next_day))
+                if existing:
+                    kv_set(attempt_key, today)
+                else:
+                    enqueue_briefing(auto=1, account_id=aid)
+                    kv_set(attempt_key, today)
             if now >= deliver:
                 for r in sql("SELECT id,created FROM runs WHERE kind='briefing' AND status='ready' AND auto=1 AND emailed=0 AND account_id=?", (aid,)):
                     run_date = datetime.datetime.fromtimestamp(r["created"]).date().isoformat()
@@ -1273,27 +1385,35 @@ def tick(now=None):
             hh, mm = map(int, sc["time"].split(":"))
             due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
             if now.weekday() in sc["days"] and due <= now <= due + grace and sc.get("last_run") != today:
-                with _cfg_lock:
-                    items = get_schedules(aid)
-                    for i in items:
-                        if i["id"] == sc["id"]:
-                            i["last_run"] = today
-                    account_kv_set(aid, "schedules", items)
                 try:
                     enqueue_task(sc["preset_id"], sc.get("note", ""), sc.get("urls", []), [], True,
                                  title=sc["name"], account_id=aid)
+                    with _cfg_lock:
+                        items = get_schedules(aid)
+                        for item in items:
+                            if item["id"] == sc["id"]:
+                                item["last_run"] = today
+                        account_kv_set(aid, "schedules", items)
                 except Exception as e:
                     log("schedule failed:", e)
 
 
 def worker_loop():
     while True:
-        job = jobs.get()
-        try:
+        _job_ready.wait()
+        with _job_lock:
+            try:
+                job = jobs.get_nowait()
+            except queue.Empty:
+                _job_ready.clear()
+                continue
+            if jobs.empty():
+                _job_ready.clear()
             with _lock:
                 state["worker_busy"] = True
+        try:
             if state["paused"]:
-                jobs.put(job)
+                put_job(job)
                 with _lock:
                     state["worker_busy"] = False
                 time.sleep(1)
@@ -1345,7 +1465,7 @@ def init():
                 update_run(r["id"], status="ready", detail="Restarted before delivery; ready to retry")
             else:
                 update_run(r["id"], status="queued", detail="Restarted; waiting to resume")
-                jobs.put(("build", r["id"]))
+                put_job(("build", r["id"]))
         else:
             update_run(r["id"], status="error", detail="Interrupted by a restart")
     sql("UPDATE runs SET status='error', detail='Interrupted by a restart' "
@@ -1362,13 +1482,16 @@ def system_status(account_id=None):
         queued = jobs.qsize()
     general = account_kv_get(account_id, "general", {}) if account_id is not None else (kv_get("general") or {})
     recipients = get_recipients(account_id) if MAIL_TO or (general or {}).get("recipients") else []
-    ollama_ready = ollama_up()
-    return {"pc_up": ollama_ready, "pc_on": ollama_ready or pc_host_up(),
+    with _health_lock:
+        health = dict(_health)
+    return {"pc_up": health["pc_up"], "pc_on": health["pc_on"],
             "email_ready": email_configured(), "recipients": recipients,
             "freshrss_ready": bool(FRESH_URL and FRESH_USER and FRESH_PASS),
             "text_model": TEXT_MODEL, "vision_model": VISION_MODEL, "pc_ip": PC_IP,
             "busy": busy, "worker_busy": worker_busy, "paused": paused, "queued": queued,
-            "active_sessions": pc_has_active_sessions()}
+            "active_sessions": health["active_sessions"],
+            "session_check_ok": health["session_check_ok"],
+            "health_checked": health["checked"] is not None}
 
 
 def set_paused(paused):
