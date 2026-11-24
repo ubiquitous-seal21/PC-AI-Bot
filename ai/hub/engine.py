@@ -447,6 +447,26 @@ def ollama_up():
         return False
 
 
+def pc_host_up():
+    if not PC_IP:
+        return False
+    try:
+        with socket.create_connection((PC_IP, 22), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def wake_pc():
+    ollama_ready = ollama_up()
+    if ollama_ready:
+        return {"sent": False, "pc_on": True, "ollama_up": True}
+    if pc_host_up():
+        return {"sent": False, "pc_on": True, "ollama_up": False}
+    send_magic()
+    return {"sent": True, "pc_on": False, "ollama_up": False}
+
+
 def magic_packet():
     mac = bytes.fromhex(re.sub(r"[^0-9a-fA-F]", "", PC_MAC))
     if len(mac) != 6:
@@ -504,19 +524,30 @@ def send_magic():
 def ensure_pc(timeout=300):
     if ollama_up():
         return
-    log("waking PC")
+    host_up = pc_host_up()
+    sent_wake = False
+    log("PC is reachable but Ollama is unavailable" if host_up else "waking PC")
     deadline, last_send = time.time() + timeout, 0
+    last_host_check = time.time()
     while time.time() < deadline:
-        if time.time() - last_send > 30:
+        now = time.time()
+        if not host_up and now - last_host_check >= 10:
+            host_up = pc_host_up()
+            last_host_check = now
+        if not host_up and now - last_send >= 30:
             send_magic()
             last_send = time.time()
+            sent_wake = True
         time.sleep(5)
         if ollama_up():
-            with _lock:
-                state["we_woke"] = True
+            if sent_wake:
+                with _lock:
+                    state["we_woke"] = True
             time.sleep(3)
             log("PC is up")
             return
+    if host_up:
+        raise RuntimeError("The PC is on, but Ollama is not responding. Check the Ollama service on the PC.")
     raise RuntimeError("The PC did not come up (Wake-on-LAN or Ollama problem)")
 
 
@@ -1093,23 +1124,29 @@ def build_briefing(rid):
         state["busy"] += 1
     try:
         r = get_run(rid)
+        if not r or r["status"] not in ("queued", "running"):
+            return
         s = get_briefing_settings(r.get("account_id"))
-        update_run(rid, status="running", detail="Fetching articles from FreshRSS")
+        update_briefing(rid, status="running", detail="Fetching articles from FreshRSS")
         items = fresh_items(s)
+        if briefing_cancelled(rid):
+            return
         when = datetime.datetime.now().strftime("%A %d %B %Y")
         if not items:
             html_out, text_out = render_briefing([("Top stories", [])], 0, 0, when)
-            update_run(rid, status="ready", detail="No articles in the window", output=html_out, extra=text_out)
+            update_briefing(rid, status="ready", detail="No articles in the window", output=html_out, extra=text_out)
             aid = r.get("account_id")
-            if aid is not None and r.get("auto"):
+            if aid is not None and r.get("auto") and not briefing_cancelled(rid):
                 account_kv_set(aid, "last_build", datetime.date.today().isoformat())
             return
         groups = cluster(items)
         fh = focus_hash(s["focuses"])
         scored = []
-        with pc_job(lambda t: update_run(rid, status="running", detail=t)):
+        with pc_job(lambda t: update_briefing(rid, status="running", detail=t)):
             for n, g in enumerate(groups, 1):
-                update_run(rid, detail=f"Scoring story {n} of {len(groups)}")
+                if briefing_cancelled(rid):
+                    return
+                update_briefing(rid, detail=f"Scoring story {n} of {len(groups)}")
                 try:
                     res = score_story(g["rep"], s["focuses"], fh)
                 except Exception as e:
@@ -1121,14 +1158,16 @@ def build_briefing(rid):
         sections = assemble(scored, s)
         shown = sum(len(i) for _, i in sections)
         html_out, text_out = render_briefing(sections, len(items), len(groups), when)
-        update_run(rid, status="ready", output=html_out, extra=text_out,
-                   detail=f"{shown} stories chosen from {len(items)} articles")
+        if briefing_cancelled(rid):
+            return
+        update_briefing(rid, status="ready", output=html_out, extra=text_out,
+                        detail=f"{shown} stories chosen from {len(items)} articles")
         aid = r.get("account_id")
-        if aid is not None and r.get("auto"):
+        if aid is not None and r.get("auto") and not briefing_cancelled(rid):
             account_kv_set(aid, "last_build", datetime.date.today().isoformat())
     except Exception as e:
         log("briefing failed:", repr(e))
-        update_run(rid, status="error", detail=str(e)[:500])
+        update_briefing(rid, status="error", detail=str(e)[:500])
     finally:
         with _lock:
             state["busy"] -= 1
@@ -1162,6 +1201,43 @@ def enqueue_briefing(auto=0, account_id=None):
     rid = new_run("briefing", "Briefing " + datetime.date.today().strftime("%a %d %b"), auto=auto, account_id=account_id)
     jobs.put(("build", rid))
     return rid
+
+
+def briefing_cancelled(rid):
+    rows = sql("SELECT status FROM runs WHERE id=? AND kind='briefing'", (rid,))
+    return not rows or rows[0]["status"] == "cancelled"
+
+
+def update_briefing(rid, **fields):
+    if not fields:
+        return
+    with _lock:
+        _db.execute(
+            "UPDATE runs SET " + ",".join(f"{key}=?" for key in fields)
+            + " WHERE id=? AND kind='briefing' AND status IN ('queued','running')",
+            (*fields.values(), rid))
+        _db.commit()
+
+
+def cancel_briefing(rid, account_id=None):
+    with _lock:
+        if account_id is None:
+            row = _db.execute(
+                "SELECT status FROM runs WHERE id=? AND kind='briefing'", (rid,)).fetchone()
+        else:
+            row = _db.execute(
+                "SELECT status FROM runs WHERE id=? AND kind='briefing' AND account_id=?",
+                (rid, account_id)).fetchone()
+        if not row:
+            raise LookupError("Briefing not found.")
+        if row["status"] not in ("queued", "running"):
+            raise RuntimeError("Only queued or running briefings can be cancelled.")
+        _db.execute(
+            "UPDATE runs SET status='cancelled', detail='Cancelled by user' "
+            "WHERE id=? AND kind='briefing' AND status IN ('queued','running')",
+            (rid,))
+        _db.commit()
+        return True
 
 
 # ---------- scheduler ----------
@@ -1286,7 +1362,9 @@ def system_status(account_id=None):
         queued = jobs.qsize()
     general = account_kv_get(account_id, "general", {}) if account_id is not None else (kv_get("general") or {})
     recipients = get_recipients(account_id) if MAIL_TO or (general or {}).get("recipients") else []
-    return {"pc_up": ollama_up(), "email_ready": email_configured(), "recipients": recipients,
+    ollama_ready = ollama_up()
+    return {"pc_up": ollama_ready, "pc_on": ollama_ready or pc_host_up(),
+            "email_ready": email_configured(), "recipients": recipients,
             "freshrss_ready": bool(FRESH_URL and FRESH_USER and FRESH_PASS),
             "text_model": TEXT_MODEL, "vision_model": VISION_MODEL, "pc_ip": PC_IP,
             "busy": busy, "worker_busy": worker_busy, "paused": paused, "queued": queued,
