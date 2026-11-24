@@ -660,6 +660,8 @@ Choose one:
 Before exposing HTTPS:
 
 1. Install a reverse proxy on the server.
+   If the proxy runs in Docker, connect it and `ai-hub` to the same external
+   Docker network (`caddy_net` in `docker-compose.yml`).
 2. Obtain a trusted local or public certificate.
 3. Restrict the proxy to your LAN or VPN.
 4. Set:
