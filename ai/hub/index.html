@@ -72,6 +72,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:6px 4px;border-bottom:1p
   <h2>Briefing</h2>
   <p class="mute">The bot reads your FreshRSS articles, merges duplicates, ranks stories by importance, and builds this page. It is emailed automatically at your delivery time (set on Customize).</p>
   <div class="row"><div class="fixed"><button class="btn" id="buildBtn">Build a briefing now</button></div>
+  <div class="fixed"><button class="btn del hide" id="cancelBriefingBtn">Cancel briefing</button></div>
   <div class="fixed"><button class="btn alt" id="sendBtn" disabled>Email this briefing</button></div></div>
   <p id="bStatus" class="mute"></p>
   <iframe id="bFrame" sandbox="" class="hide"></iframe>
@@ -216,21 +217,29 @@ function openTab(id){
 function fillAll(){fillCustom();fillPresets();fillSched()}
 
 // ----- briefing tab -----
+let bPoll=null;
+let currentBriefing=null;
 async function loadLatestBriefing(){
   const rs=await api("GET","/api/runs?kind=briefing");
   const r=rs.find(x=>["ready","sent","running","queued"].includes(x.status))||null;
   if(r)showBriefing(r.id);
+  else{currentBriefing=null;$("#bStatus").textContent="No briefing yet.";$("#bFrame").classList.add("hide");$("#buildBtn").disabled=false;$("#cancelBriefingBtn").classList.add("hide");$("#sendBtn").disabled=true}
 }
 async function showBriefing(id){
   clearTimeout(bPoll);
   const r=await api("GET","/api/runs/"+id);currentBriefing=r;
   const f=$("#bFrame");
+  const active=["queued","running"].includes(r.status);
+  $("#buildBtn").disabled=active;
+  $("#cancelBriefingBtn").classList.toggle("hide",!active);
   $("#sendBtn").disabled=!["ready","sent"].includes(r.status);
   if(["ready","sent"].includes(r.status)){f.classList.remove("hide");f.srcdoc=r.output;$("#bStatus").textContent=r.title+" · "+(r.detail||"")+(r.emailed?" · emailed":"")}
   else if(r.status==="error"){f.classList.add("hide");$("#bStatus").textContent="Failed: "+r.detail}
+  else if(r.status==="cancelled"){f.classList.add("hide");$("#bStatus").textContent=r.title+" · Cancelled"}
   else{$("#bStatus").textContent=r.title+" · "+(r.detail||"Working")+"...";bPoll=setTimeout(()=>showBriefing(id),3000)}
 }
 $("#buildBtn").onclick=async()=>{try{const j=await api("POST","/api/briefing/build",{});showBriefing(j.id)}catch(e){toast(e.message)}};
+$("#cancelBriefingBtn").onclick=async()=>{if(!currentBriefing||!confirm("Cancel this briefing?"))return;try{await api("POST","/api/runs/"+currentBriefing.id+"/cancel",{});clearTimeout(bPoll);toast("Briefing cancelled");showBriefing(currentBriefing.id)}catch(e){toast(e.message)}};
 $("#sendBtn").onclick=async()=>{if(!currentBriefing)return;try{await api("POST","/api/runs/"+currentBriefing.id+"/send",{});toast("Sent");showBriefing(currentBriefing.id)}catch(e){toast(e.message)}};
 
 // ----- customize tab -----
@@ -358,16 +367,16 @@ async function openRun(r){
 async function loadSys(){
   S=await api("GET","/api/state");const s=S.status,box=$("#sysInfo");box.textContent="";
   const line=(k,v,good)=>box.append(el("div",{class:"card"},el("b",{textContent:k+": "}),el("span",{class:good===undefined?"":(good?"ok":"bad"),textContent:v})));
-  line("PC and Ollama",s.pc_up?"reachable":"asleep or off",s.pc_up);line("Email",s.email_ready?"configured":"not configured (see .env)",s.email_ready);
+  line("PC",s.pc_on?"on":"off or unreachable",s.pc_on);line("Ollama",s.pc_up?"reachable":(s.pc_on?"PC is on, but Ollama is unreachable":"unavailable"),s.pc_up);line("Email",s.email_ready?"configured":"not configured (see .env)",s.email_ready);
   line("Recipients",s.recipients.join(", ")||"none set",s.recipients.length>0);line("FreshRSS",s.freshrss_ready?"configured":"not configured (see .env)",s.freshrss_ready);
   line("Models",s.text_model+" (text), "+s.vision_model+" (vision)");line("PC address",s.pc_ip);
   line("Desktop safety",s.active_sessions?"active session detected: no automatic shutdown":"no active session detected",!s.active_sessions);
   line("AI scheduler",s.paused?"paused":"running",!s.paused);
 }
-$("#wakeBtn").onclick=async()=>{try{await api("POST","/api/pc/wake",{});toast("Magic packet sent")}catch(e){toast(e.message)}};
+$("#wakeBtn").onclick=async()=>{try{const s=await api("POST","/api/pc/wake",{});toast(s.ollama_up?"PC and Ollama are already ready":s.pc_on?"PC is already on, but Ollama is unreachable":"Magic packet sent")}catch(e){toast(e.message)}};
 $("#offBtn").onclick=async()=>{if(confirm("Power the PC off now?")){try{await api("POST","/api/pc/off",{});toast("Power-off sent")}catch(e){toast(e.message)}}};
 $("#pauseBtn").onclick=async()=>{try{const pa=!(S&&S.status&&S.status.paused);const j=await api("PUT","/api/pc/pause",{paused:pa});S.status.paused=j.paused;$("#pauseBtn").textContent=j.paused?"Resume AI":"Pause AI";toast(j.paused?"AI paused":"AI resumed")}catch(e){toast(e.message)}};
-setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
+setInterval(async()=>{if($("#app").classList.contains("hide"))return;try{const s=await api("GET","/api/state");S=s;const st=s.status;$("#pcState").textContent="PC: "+(st.pc_up?"on":st.pc_on?"on · Ollama offline":"off");$("#pcState").className="pill "+(st.pc_up?"ok":"");const activity=st.paused?"Paused":(st.worker_busy||st.busy?"Working":st.queued?"Queued":"Idle");$("#activityState").textContent=activity;$("#activityState").className="pill "+(activity==="Working"?"ok":"");$("#pauseBtn").textContent=st.paused?"Resume AI":"Pause AI";$("#widgetActivity").textContent=(st.queued+" queued · "+(st.busy+" active jobs")+" · "+(st.active_sessions?"desktop/session active":"no active desktop session"));$("#widgetUsage").textContent=(st.pc_up?"Ollama reachable":st.pc_on?"PC on · Ollama unreachable":"PC/Ollama offline")+" · "+st.text_model+" · "+st.vision_model;$("#widgetConsole").textContent=new Date().toLocaleTimeString()+"  "+activity+"\n"+(st.queued+" queued / "+st.busy+" active");}catch(e){}},15000);
 
 $("#loginBtn").onclick=async()=>{try{await api("POST","/api/login",{username:$("#accountName").value,password:$("#pw").value});$("#loginErr").textContent="";start()}catch(e){$("#loginErr").textContent=e.message}};
 $("#pw").addEventListener("keydown",e=>{if(e.key==="Enter")$("#loginBtn").click()});

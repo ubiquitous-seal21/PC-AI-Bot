@@ -509,6 +509,10 @@ Verify:
 - The desktop side widgets appear.
 - The **System** tab lists email, recipients, FreshRSS, and Ollama readiness.
 
+The dashboard distinguishes the PC being reachable from Ollama being ready. If
+the PC is on but Ollama is unavailable, check the `ollama` service on the PC
+instead of repeatedly sending Wake-on-LAN packets.
+
 Keep automatic shutdown disabled:
 
 ```dotenv
@@ -568,6 +572,10 @@ Expected flow:
 4. Review the rendered result.
 5. Click **Email this briefing**.
 6. Confirm the HTML/text email arrives.
+
+Queued or running briefings can be stopped with **Cancel briefing**. A request
+already in progress may finish its current model call, but its result will not
+be saved or emailed after cancellation.
 
 Then open **Customize** and set:
 

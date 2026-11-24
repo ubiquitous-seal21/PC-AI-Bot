@@ -182,6 +182,17 @@ def send_run(rid):
         return err(str(e))
 
 
+@app.post("/api/runs/<int:rid>/cancel")
+def cancel_run(rid):
+    try:
+        E.cancel_briefing(rid, current_account_id())
+        return ok(id=rid, status="cancelled")
+    except LookupError as e:
+        return err(str(e), 404)
+    except RuntimeError as e:
+        return err(str(e), 409)
+
+
 @app.post("/api/task")
 def task():
     f = request.form
@@ -239,8 +250,7 @@ def email_test():
 @app.post("/api/pc/wake")
 def pc_wake():
     try:
-        E.send_magic()
-        return ok()
+        return ok(**E.wake_pc())
     except Exception as e:
         return err(str(e))
 

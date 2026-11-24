@@ -49,6 +49,34 @@ class EngineSafetyTests(unittest.TestCase):
             self.e.PC_MAC = original_mac
             self.e.LAN_BROADCAST = original_broadcast
 
+    def test_wake_does_not_send_magic_packet_when_pc_is_already_reachable(self):
+        with patch.object(self.e, "ollama_up", return_value=False), patch.object(
+            self.e, "pc_host_up", return_value=True
+        ), patch.object(self.e, "send_magic") as send_magic:
+            self.assertEqual(self.e.wake_pc(), {
+                "sent": False, "pc_on": True, "ollama_up": False
+            })
+            send_magic.assert_not_called()
+
+    def test_ensure_pc_does_not_mark_an_already_on_pc_as_woken_by_hub(self):
+        with patch.object(self.e, "ollama_up", side_effect=[False, True]), patch.object(
+            self.e, "pc_host_up", return_value=True
+        ), patch.object(self.e, "send_magic") as send_magic, patch.object(
+            self.e.time, "sleep"
+        ):
+            self.e.state["we_woke"] = False
+            self.e.ensure_pc(timeout=1)
+            send_magic.assert_not_called()
+            self.assertFalse(self.e.state["we_woke"])
+
+    def test_ensure_pc_reports_when_online_host_has_no_ollama(self):
+        with patch.object(self.e, "ollama_up", return_value=False), patch.object(
+            self.e, "pc_host_up", return_value=True
+        ), patch.object(self.e, "send_magic") as send_magic:
+            with self.assertRaisesRegex(RuntimeError, "PC is on, but Ollama"):
+                self.e.ensure_pc(timeout=0)
+            send_magic.assert_not_called()
+
     def test_active_session_detection_blocks_shutdown_for_active_session(self):
         with patch.object(self.e, "run", return_value=type("P", (), {
             "returncode": 0, "stdout": "SessionActive=yes\n", "stderr": ""
@@ -216,6 +244,34 @@ class EngineSafetyTests(unittest.TestCase):
     def test_pause_toggle_is_persistent_in_process(self):
         self.assertTrue(self.e.set_paused(True))
         self.assertFalse(self.e.set_paused(False))
+
+    def test_cancel_briefing_prevents_late_worker_updates(self):
+        rid = self.e.new_run("briefing", "Briefing")
+        self.e.cancel_briefing(rid)
+        self.e.update_briefing(rid, status="ready", output="late result")
+        run = self.e.get_run(rid)
+        self.assertEqual(run["status"], "cancelled")
+        self.assertEqual(run["detail"], "Cancelled by user")
+
+    def test_cancelled_queued_briefing_is_skipped_by_worker(self):
+        rid = self.e.new_run("briefing", "Briefing")
+        self.e.cancel_briefing(rid)
+        with patch.object(self.e, "fresh_items", side_effect=AssertionError("should not fetch")):
+            self.e.build_briefing(rid)
+        self.assertEqual(self.e.get_run(rid)["status"], "cancelled")
+
+    def test_cancel_briefing_rejects_completed_runs(self):
+        rid = self.e.new_run("briefing", "Briefing")
+        self.e.update_briefing(rid, status="ready")
+        with self.assertRaises(RuntimeError):
+            self.e.cancel_briefing(rid)
+
+    def test_cancel_briefing_is_account_scoped(self):
+        account = self.e.create_account("Briefing owner", "briefing-password")
+        rid = self.e.new_run("briefing", "Briefing", account_id=account["id"])
+        with self.assertRaises(LookupError):
+            self.e.cancel_briefing(rid, account_id=account["id"] + 1)
+        self.assertEqual(self.e.get_run(rid)["status"], "queued")
 
     def test_accounts_are_separate_and_passwords_are_verified_by_hash(self):
         first = self.e.create_account("Alice", "alice-password")
