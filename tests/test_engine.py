@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -22,6 +23,22 @@ class EngineSafetyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.e = load_engine()
         cls.e.PC_USER = "test-user"
+
+    def run_session_check(self, loginctl_body):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            loginctl = os.path.join(temp_dir, "loginctl")
+            with open(loginctl, "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\n" + loginctl_body)
+            os.chmod(loginctl, 0o755)
+            env = os.environ.copy()
+            env["PATH"] = temp_dir + os.pathsep + env.get("PATH", "")
+            return subprocess.run(
+                ["sh", "-c", self.e.pc_session_check_shell()],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
 
     def test_magic_packet_accepts_only_a_valid_mac(self):
         self.e.PC_MAC = "AA:BB:CC:DD:EE:FF"
@@ -106,36 +123,38 @@ class EngineSafetyTests(unittest.TestCase):
         })):
             self.assertFalse(self.e.pc_has_active_sessions())
 
-    def test_kde_screenlocker_process_allows_shutdown(self):
-        with patch.object(self.e, "run", return_value=type("P", (), {
-            "returncode": 0,
-            "stdout": "Active=yes State=active LockedHint=no IdleHint=no Type=x11 Class=user\nLockedDesktop=yes\n",
-            "stderr": ""
-        })):
-            self.assertFalse(self.e.pc_has_active_sessions())
-
-    def test_session_check_inspects_kde_locker_executable(self):
-        with patch.object(self.e, "run", return_value=type("P", (), {
-            "returncode": 0, "stdout": "", "stderr": ""
-        })) as run:
-            self.e.pc_has_active_sessions()
-            remote_command = " ".join(run.call_args.args[0])
-            self.assertIn("/proc/[0-9]*/exe", remote_command)
-            self.assertIn("kscreenlocker_greet", remote_command)
-
-    def test_locked_desktop_does_not_override_multiple_active_sessions(self):
+    def test_kde_locker_process_cannot_override_unlocked_logind_session(self):
         script = self.e.pc_session_check_shell()
-        self.assertIn("active=$((active+1))", script)
-        self.assertIn('[ "$active" -eq 1 ]', script)
+        self.assertIn("-p LockedHint", script)
+        self.assertIn('[ "$locked" != yes ]', script)
+        self.assertNotIn("/proc/[0-9]*/exe", script)
+        self.assertNotIn("kscreenlocker_greet", script)
 
-    def test_remote_session_is_not_ignored(self):
-        with patch.object(self.e, "run", return_value=type("P", (), {
-            "returncode": 0, "stdout": "", "stderr": ""
-        })) as run:
-            self.e.pc_has_active_sessions()
-            remote_command = " ".join(run.call_args.args[0])
-            self.assertIn("remote=$(printf", remote_command)
-            self.assertIn("[ \"$locked\" != yes ]", remote_command)
+    def test_multiple_active_sessions_block_shutdown_and_greeter_is_ignored(self):
+        result = self.run_session_check(
+            "if [ \"$1\" = list-sessions ]; then\n"
+            "  printf '1 alice seat0\\n2 bob seat0\\n3 sddm seat0\\n'\n"
+            "elif [ \"$2\" = 3 ]; then\n"
+            "  printf 'Active=yes\\nState=active\\nLockedHint=no\\nType=wayland\\nClass=greeter\\n'\n"
+            "else\n"
+            "  printf 'Active=yes\\nState=active\\nLockedHint=no\\nType=wayland\\nClass=user\\n'\n"
+            "fi\n"
+        )
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("SessionActive=yes", result.stdout)
+
+    def test_locked_user_and_greeter_sessions_allow_shutdown(self):
+        result = self.run_session_check(
+            "if [ \"$1\" = list-sessions ]; then\n"
+            "  printf '1 alice seat0\\n2 sddm seat0\\n'\n"
+            "elif [ \"$2\" = 1 ]; then\n"
+            "  printf 'Active=yes\\nState=active\\nLockedHint=yes\\nType=wayland\\nClass=user\\n'\n"
+            "else\n"
+            "  printf 'Active=yes\\nState=active\\nLockedHint=no\\nType=wayland\\nClass=greeter\\n'\n"
+            "fi\n"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("SessionActive=yes", result.stdout)
 
     def test_active_session_check_fails_closed_on_ssh_error(self):
         with patch.object(self.e, "run", return_value=type("P", (), {
