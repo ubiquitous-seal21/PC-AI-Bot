@@ -695,9 +695,12 @@ automatic shutdown behavior on the Arch PC with the greeter or KDE lockscreen
 active: it should power off after the configured idle period. If a real desktop
 user session is unlocked and active, the PC should remain on.
 
-The update includes locked-session detection for systemd-logind. If SSH or
-session checks stop working, leave automatic shutdown disabled by setting
-`IDLE_OFF_MIN=0` and rerun the setup verifier:
+The update uses systemd-logind session class and lock hints for greeter and
+desktop-session detection. An unlocked KDE Plasma session blocks automatic
+shutdown; a greeter or session reported as locked does not. Detection does not
+infer lock state from a screen-locker process, which can remain running after
+the desktop is unlocked. If SSH or session checks stop working, leave automatic
+shutdown disabled with `IDLE_OFF_MIN=0` and rerun the setup verifier:
 
 ```bash
 ./scripts/verify_setup.sh
